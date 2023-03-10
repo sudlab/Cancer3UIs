@@ -1,0 +1,87 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r, fig.height=2.5, fig.width=2.5}
+library(data.table)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+non_cds_utrons <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz", header=F, col.names = c("chr", "start", "end", "name", "score", "strand", "stop"))
+novel_ids <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.novel_utrons.ids.gz", header=F, col.names = c("transcript_id", "match_transcript_id"))
+expressed_tx = read.delim("../../../../../Notebooks/total_expressed.tsv", sep=",")
+novel_ids$novel = TRUE
+plot = non_cds_utrons %>% 
+  separate(name, into=c("transcript_id", "match_transcript_id"), sep=":") %>%
+  mutate(novel = transcript_id %in% novel_ids$transcript_id,
+         expressed = transcript_id %in% expressed_tx$transcript_id) %>%
+  replace_na(list(novel=FALSE)) %>%
+  mutate(size=abs(start-end),
+         novel=ifelse(novel, "Novel 3UI", "Annotated 3UI"),
+         expressed=ifelse(expressed, "Expressed", "Detected")) %>%
+  dplyr::select(chr,start, end, strand, size, novel, expressed) %>% distinct()
+plot_stats = plot %>% group_by(novel, expressed) %>%
+  summarise(median_size=median(size))
+plot %>% 
+  ggplot() +
+  aes(x=size, fill=novel) +
+  geom_density() +
+  scale_x_log10(labels=trans_format('log10', math_format(10^.x))) +
+  theme_bw(base_size=8) +
+  theme(strip.background = element_rect(fill="white"),
+        axis.text.y=element_text(size=8),
+        axis.text.x = element_text(size=8),
+        axis.title=element_text(size=8),
+        strip.text = element_text(size=8),
+        legend.position="none") + 
+  facet_grid(vars(expressed), vars(novel)) + 
+  labs(x="3UI size", y="Density") + 
+  geom_vline(data=plot_stats, aes(xintercept=median_size), lty=2) +
+  scale_fill_manual(values=c("#999999", "orange"))
+ggsave("size_plots_expressed.png", height=2.5,  width=2.5, units="in")
+```
+
+How big are the partnered ones, i.e. the ones where there is evidence of a retaining isoform (I.e. sequence that can be modulated, gets rid of constitutively spliced ones etc)
+
+```{r, fig.height=2.5, fig.width=2.5}
+partnered = read.delim("/shared/sudlab1/utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.partnered_utrons.bed.gz", header=F)
+
+plot = partnered %>% 
+  separate(V4, into=c("transcript_id", "match_transcript_id"), sep=":") %>%
+  mutate(novel = transcript_id %in% novel_ids$transcript_id,
+         expressed = transcript_id %in% expressed_tx$transcript_id) %>%
+  replace_na(list(novel=FALSE)) %>%
+  mutate(size=abs(V2-V3),
+         novel=ifelse(novel, "Novel Partnered 3UI", "Annotated Partnered 3UI"),
+         expressed=ifelse(expressed, "Expressed", "Detected")) %>%
+  dplyr::select(V1, V2, V3, V6, size, novel, expressed) %>% distinct()
+plot_stats = plot %>% group_by(novel, expressed) %>%
+  summarise(median_size=median(size))
+plot %>% 
+  ggplot() +
+  aes(x=size, fill=novel) +
+  geom_density() +
+  scale_x_log10(labels=trans_format('log10', math_format(10^.x))) +
+  theme_bw(base_size=8) +
+  theme(strip.background = element_rect(fill="white"),
+        axis.text.y=element_text(size=8),
+        axis.text.x = element_text(size=8),
+        axis.title=element_text(size=8),
+        strip.text = element_text(size=6),
+        legend.position="none") + 
+  facet_grid(vars(expressed), vars(novel)) + 
+  labs(x="3UI size", y="Density") + 
+  geom_vline(data=plot_stats, aes(xintercept=median_size), lty=2) +
+  scale_fill_manual(values=c("#999999", "orange"))
+ggsave("size_plots_expressed_partnered.png", height=2.5, width=2.5, units="in")
+```
+

@@ -1,0 +1,255 @@
+---
+title: "DESeq2 analysis of nuclear vs cytosolic"
+output: html_document
+---
+
+Import libs for DESeq2
+
+```{r}
+library(DESeq2)
+library(tximport)
+library(dplyr)
+```
+
+Load files
+
+```{r}
+tx2gene<-read.delim(file='../expression.dir/tx2gene.tsv', 
+                    header = TRUE, sep = '\t', dec = '.')
+
+quant_dir = "../quantification.dir"
+all_files = paste0(list.files(quant_dir), "/quant.sf")
+all_files = file.path(quant_dir,  all_files)
+
+sample_names <- sapply(all_files, function(x) substr(x, 0, nchar(x)-35))
+sample_names <- sapply(sample_names, function(x) substr(x, 23, nchar(x)))
+names(all_files) <- sample_names
+```
+
+Make sample table
+
+```{r}
+sample_table = data.frame(files=all_files, names=sample_names)
+sample_table$condition = c("cyto", "cyto", "cyto", "nuclear", "nuclear", "nuclear")
+sample_table$files = as.character(sample_table$files) 
+sample_table = sample_table[file.exists(sample_table$files),]
+sample_table = sample_table %>% filter(condition %in% c("cyto", "nuclear"))
+```
+
+import with tximport
+
+```{r}
+txi <- tximport(sample_table$files, type="salmon", tx2gene=tx2gene, txOut=T)
+```
+
+generate deseq data set, structured to compare conditions
+
+```{r}
+dds <- DESeqDataSetFromTximport(txi, sample_table, ~condition)
+```
+
+deseq result
+
+```{r}
+dds_done = DESeq(dds)
+```
+
+```{r}
+nrow(dds_done)
+dds_result = results(dds_done)
+```
+
+Plots
+
+```{r}
+plotMA(dds_result)
+```
+
+```{r}
+dds_result = lfcShrink(dds_done, coef="condition_nuclear_vs_cyto", res=dds_result, type="apeglm")
+plotMA(dds_result)
+```
+
+Filter for to only have 3UI transcripts, then annotate with gene symbol from the ensembl id.
+
+```{r}
+library(data.table)
+
+utron_ids = read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.ids.gz", header=F)
+
+library(dplyr)
+
+utron_ids = utron_ids %>% 
+  distinct() %>% 
+  unlist() %>% 
+  unname()
+
+result_df = as.data.frame(dds_result)
+
+result_df_has_utron = setDT(result_df, keep.rownames=T) %>%
+  filter(rn %in% utron_ids)
+
+row.names(result_df_has_utron) = result_df_has_utron$rn
+
+result_df_has_utron = left_join(result_df_has_utron, tx2gene, by=c("rn"="transcript_id"))
+
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+result_df_has_utron$match_gene_id = as.character(result_df_has_utron$match_gene_id)
+result_df_has_utron$symbol = mapIds(org.Hs.eg.db,
+                             keys=result_df_has_utron$match_gene_id,
+                             column="SYMBOL",
+                             keytype="ENSEMBL",
+                             multiVals="first")
+```
+
+Save/Load checkpoint
+
+```{r}
+#save.image("afterResult.RData")
+#load("afterResult.RData")
+```
+
+
+Filter for those which has significant DTE. 
+
+```{r}
+sig_result_df = result_df %>% filter(padj<0.05)
+sig_result_df_has_utron = result_df_has_utron %>% filter(padj<0.05)
+```
+
+write out
+
+```{r}
+fwrite(sig_result_df, "all_sig_DTE_siUPF1.csv")
+fwrite(sig_result_df_has_utron,"utron_sig_DTE_siUPF1.csv")
+```
+
+## ECDF plots 
+
+Load bed files for each 3UI class, then create a dataframe to allow us to compare classifications.
+
+```{r}
+all_utrons <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.bed.gz", header=F)
+novel_utrons <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.novel_utrons.bed.gz", header=F)
+partnered_utrons <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.partnered_utrons.bed.gz", header=F)
+non_cds <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz", header=F)
+
+library(tidyr)
+novel_utrons = tidyr::separate(novel_utrons, V4, c("id", "partner_id"), sep=":")
+partnered_utrons = tidyr::separate(partnered_utrons, V4, c("id", "partner_id"), sep=":")
+non_cds = tidyr::separate(non_cds, V4, c("id", "partner_id"), sep=":")
+
+
+
+utron_annotation <- data.frame(  transcript_id = result_df$rn) %>%
+  mutate(utron = transcript_id %in% all_utrons$V4,
+         novel_utron = transcript_id %in% novel_utrons$id,
+         partnered_utron = transcript_id %in% partnered_utrons$id,
+         non_cds = transcript_id %in% non_cds$id)
+```
+
+Filter for TPM to remove fold changes which are due to very small changes
+
+We will filter for transcripts which have over 1TPM in either fraction
+
+```{r}
+library(stringr)
+library(data.table)
+
+expression = fread("../expression.dir/utrons_expression.tsv.gz") 
+
+nuc_expression = expression %>% 
+  filter(str_detect(sample_id, "nuclear")) %>% 
+  group_by(transcript_id) %>% 
+  summarize(transcript_tpm=mean(transcript_tpm))
+
+cyto_expression = expression %>% 
+  filter(str_detect(sample_id, "cyto")) %>% 
+  group_by(transcript_id) %>% 
+  summarize(transcript_tpm=mean(transcript_tpm))
+
+over1TPM_nuc = nuc_expression %>% filter(transcript_tpm>1) %>% dplyr::select(transcript_id) %>% unlist() %>% unname()
+over1TPM_cyto = cyto_expression %>% filter(transcript_tpm>1) %>% dplyr::select(transcript_id) %>% unlist() %>% unname()
+
+over1_either = c(over1TPM_cyto, over1TPM_nuc) %>% unique()
+```
+
+
+Lets also just focus on the protein coding transcripts. We specified in our 3UI classification system that they must match APRIS TSL1/2 and be protein coding, so we should only be comparing to other protein coding genes.
+
+```{r}
+library(biomaRt)  
+mart <- useMart(biomart = "ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", host = 'www.ensembl.org')
+genes <- biomaRt::getBM(attributes = c("external_gene_name", "ensembl_gene_id", "chromosome_name","transcript_biotype"), filters = c("transcript_biotype","chromosome_name"),values = list("protein_coding",c(1:22)), mart = mart, useCache = F)
+```
+
+Filter tx2gene to get all the tx to filter by
+
+```{r}
+filtered_tx2gene = tx2gene %>% filter(match_gene_id %in% genes$ensembl_gene_id)
+```
+
+```{r}
+filterOUT = result_df %>% filter(rn %in% over1_either) %>%
+  inner_join(utron_annotation, by=c("rn"="transcript_id")) %>% 
+  filter(non_cds==FALSE&utron==TRUE) %>% dplyr::select(rn) %>% unlist() %>% unname()
+```
+
+
+
+```{r, fig.height=2.5, fig.width=2.5}
+##################################################################
+#######   This part is for getting a significance value    #######
+##################################################################
+
+prot_coding = result_df %>% filter(rn%in% over1_either) %>%
+  inner_join(utron_annotation, by=c("rn"="transcript_id")) %>%
+  dplyr::filter(rn %in% filtered_tx2gene$transcript_id) %>% 
+  na.omit() %>% 
+  filter(utron==F)
+
+non_ptc = result_df %>% filter(rn %in% over1_either) %>%
+  inner_join(utron_annotation, by=c("rn"="transcript_id")) %>%
+  dplyr::filter(rn %in% filtered_tx2gene$transcript_id) %>%
+  na.omit() %>% 
+  filter(utron==TRUE&non_cds==TRUE)
+
+test = ks.test(prot_coding$log2FoldChange, non_ptc$log2FoldChange)
+
+##################################################################
+#######                      Plot                          #######
+##################################################################
+
+result_df %>% 
+  filter(rn %in% over1_either) %>%
+  inner_join(utron_annotation, by=c("rn"="transcript_id")) %>%
+  dplyr::filter(rn %in% filtered_tx2gene$transcript_id) %>%
+  filter(!rn %in% filterOUT) %>%
+  ggplot() +
+  aes(col=utron, x=log2FoldChange) +
+  stat_ecdf() +
+  coord_cartesian(xlim=c(-0.5,0.5)) +
+  labs(x="Log2FoldChange(Nuclear/Cytosolic)",
+         y="Cumulative Frequency") +
+  scale_color_manual(labels=c("Protein-coding","nonPTC 3UI"), 
+                     values=c("black", "orange"), 
+                     name=NULL) +
+  theme_bw(base_size=8) +   
+  theme(legend.position="top",
+        plot.subtitle=element_text(size=10),
+        legend.key=element_rect(fill="white"),
+        legend.title = element_blank(),
+        legend.text = element_text(size=8),
+        axis.text = element_text(size=8),
+        axis.title= element_text(size=8),
+        legend.box.margin = margin(-7.5,0,-7.5,0)) + 
+  guides(col=guide_legend(title="Transcript Class")) + 
+  annotate("text", label=paste0("D=",round(test$statistic,2)), x=0.35, y=0.55) + 
+  annotate("text", label=paste0("p=",round(test$p.value,4)), x=0.35, y=0.45) + 
+  annotate("text", label="\u2191Nuclear", x=0.5, y=0.05, hjust=1) +
+  annotate("text", label="\u2191Cytosolic", x=-0.5, y=0.95, hjust=0) 
+
+ggsave("cyto_nuclear_distib.png", height=2.5, width=2.5, units="in")
+```

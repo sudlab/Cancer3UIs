@@ -1,0 +1,92 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(data.table)
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+non_cds_utrons <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz", header=F, col.names = c("chr", "start", "end", "name", "score", "strand", "stop"))
+novel_ids <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.novel_utrons.ids.gz", header=F, col.names = c("transcript_id", "match_transcript_id"))
+expressed = read.delim("../../../../../Notebooks/total_expressed.tsv", sep=",")
+novel_ids$novel = TRUE
+non_cds_utrons %>% 
+  separate(name, into=c("transcript_id", "match_transcript_id"), sep=":") %>%
+  mutate(novel = transcript_id %in% novel_ids$transcript_id,
+         expressed = transcript_id %in% expressed$transcript_id) %>%
+  replace_na(list(novel=FALSE)) %>%
+  mutate(distance=ifelse(strand=="+", start-stop, stop-end)) %>%
+  dplyr::group_by(transcript_id, match_transcript_id, novel) %>%
+  dplyr::summarize(distance=max(distance)) %>%
+  filter(novel==FALSE) %>%
+  ggplot() +
+  aes(x=distance) +
+  scale_x_log10(label=scales::comma) +
+  geom_vline(xintercept = 55, lty=2, col="grey20") +
+  theme_bw(base_size=12) +
+  theme(aspect.ratio=1) +
+  stat_density(fill=NA, col="black", geom="line") +
+  xlab("Distance to stop") +
+  ggtitle("Known 3UI introns")
+```
+
+
+```{r}
+non_cds_utrons %>%
+  separate(name, into=c("transcript_id", "match_transcript_id"), sep=":") %>%
+  left_join(novel_ids) %>% 
+  replace_na(list(novel=FALSE)) %>%
+  mutate(distance=ifelse(strand=="+", start-stop, stop-end)) %>%
+  group_by(transcript_id, match_transcript_id, novel) %>%
+  summarise(distance=max(distance)) %>%
+  filter(novel==TRUE) %>%
+  ggplot() +
+  aes(x=distance) +
+  scale_x_log10(label=scales::comma) +
+  geom_vline(xintercept = 55, lty=2, col="grey20") +
+  theme_bw(base_size=12) +
+  theme(aspect.ratio=1) +
+  stat_density(fill=NA, col="black", geom="line") +
+  xlab("Distance to stop") +
+  ggtitle("Novel 3UI introns")
+
+```
+
+```{r, fig.height=2.5, fig.width=2.5}
+library(scales)
+non_cds_utrons %>%
+  separate(name, into=c("transcript_id", "match_transcript_id"), sep=":") %>%
+  left_join(novel_ids) %>% 
+  replace_na(list(novel=FALSE)) %>%
+  mutate(distance=ifelse(strand=="+", start-stop, stop-end),
+         novel=ifelse(novel, "Novel 3UI", "Annotated 3UI"),
+         expressed = ifelse(transcript_id %in% expressed$transcript_id, "Expressed", "Detected")) %>%
+  group_by(transcript_id, match_transcript_id, novel, expressed) %>%
+  summarise(distance=max(distance)) %>%
+  ggplot() +
+  aes(x=distance, fill=novel) +
+  scale_x_log10(labels=trans_format('log10', math_format(10^.x))) +
+  theme_bw(base_size=8) +
+  theme(axis.text = element_text(size=8),
+        axis.text.x = element_text(size=8),
+        strip.background = element_rect(fill="white"),
+        strip.text= element_text(size=8),
+        axis.title= element_text(size=8),
+        legend.position = "none") +
+  geom_density() + 
+    geom_vline(xintercept = 55, lty=2, col="black") +
+  xlab("Distance to stop") +
+  ylab("Density") + 
+  facet_grid(vars(expressed),vars(novel)) + 
+  scale_fill_manual(values=c("#999999", "orange"))
+ggsave("distance_plots_expressed.png", height=2.5,  width=2.5, units="in")
+```
+

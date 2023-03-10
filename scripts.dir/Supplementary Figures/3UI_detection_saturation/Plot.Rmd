@@ -1,0 +1,31 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+Plot output of saturation script 
+
+```{r load, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+```
+
+
+```{r}
+data = read.delim("all.summary.tsv")
+```
+
+```{r, fig.height=2.5, fig.width=3.5}
+data %>% ggplot(aes(x=n, y = events)) + 
+  geom_smooth(color="black", method="loess") + 
+  geom_point(alpha=0.25) + 
+  theme_bw(base_size=8) + 
+  theme(axis.text = element_text(size=8),
+        axis.title = element_text(size=8)) + 
+  labs(x = "Number of Samples",
+       y = "3UI events detected")
+ggsave("saturation.png", height=2.5, width=3.5, units="in")
+```
+

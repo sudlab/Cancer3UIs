@@ -1,0 +1,231 @@
+---
+title: "Compare number of highly expressed transcripts between tissues"
+output:
+  html_document:
+    df_print: paged
+---
+
+### Purpose
+
+This purpose of this script is to identify "broadly expressed" transcripts, and compare their expression between different cancer types. Are they cancer specific? Are they pan-cancer?
+
+We qualifies as a broadly expressed transcript?
+
+Transcripts which have over 1TPM
+Transcripts which account for 25% of the gene output
+Transcripts which are expressed (according to these 2 criteria) in over 10% of samples
+
+### Code
+
+Load libraries
+
+```{r message = FALSE, warning = FALSE}
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(tidyr)
+library(duckdb)
+library(arrow)
+library(stringr)
+```
+
+Create DuckDB connection - we have quantification data stored in .parquet format (efficient compression system for archiving large tabular datasets)
+
+```{r}
+duckdb_connection = dbConnect(duckdb())
+```
+
+SETTINGS
+
+```{r}
+# Must be characters
+quant_dir  = "../../../all_TCGA/quant/"
+TPM_cutoff = "1"
+TX_G_cutoff = "0.25"
+# Must be numeric
+sample_pct = 0.1
+
+utrons_ids = fread("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.ids.gz") %>% unlist() %>% unname()
+```
+
+We are interested here in the "bona-fide" or "nonPTC" 3UIs, which are stored in the no_cds.bed.gz
+
+We will define a function to pull the transcript_ids that match our criteria within each tissue type
+
+```{r}
+#get nonPTC locations and transcript names
+non_cds_locations <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz",
+                                header = FALSE,
+                                col.names = c("contig", "start", "end", "name", "score", "strand", "stopcodon")) %>%
+  separate(name, sep=":", into=c("transcript_id", "match_id")) %>%
+  distinct(contig, start, end, transcript_id) %>%
+  mutate(end=end+1)
+
+#add this to our connection
+duckdb_register(duckdb_connection, "non_cds_locations", non_cds_locations)
+
+#define our function
+getFromDDB = function(tissue_type, utrons_ids){
+  
+  # Query to get the number of normal and cancer samples
+  
+  n_normal = dbGetQuery(duckdb_connection, paste0("SELECT DISTINCT sample_id 
+                                                    FROM read_parquet('", quant_dir, tissue_type, "/parquet/utrons_expression/*.parquet') 
+                                                    WHERE sample_id LIKE '%NO%'")) %>% nrow()
+  
+  n_cancer = dbGetQuery(duckdb_connection, paste0("SELECT DISTINCT sample_id 
+                                                    FROM read_parquet('", quant_dir, tissue_type, "/parquet/utrons_expression/*.parquet') 
+                                                    WHERE sample_id NOT LIKE '%NO%'")) %>% nrow()
+  
+  # Query to get a summary of each transcript (in either healthy or cancer) and how many times it is expressed (based on settings in chunk 4)
+  
+  normals = dbGetQuery(duckdb_connection, paste0("SELECT transcript_id, 
+                                                            COUNT(sample_id) as n_expressed,
+                                                    FROM read_parquet('", quant_dir, tissue_type, "/parquet/utrons_expression/*.parquet') 
+                                                    WHERE sample_id LIKE '%NO%' AND 
+                                                          transcript_tpm>",TPM_cutoff," AND 
+                                                          fract_expr>",TX_G_cutoff," ", 
+                                                    "GROUP BY gene_id, transcript_id"))
+
+  cancers = dbGetQuery(duckdb_connection, paste0("SELECT transcript_id, 
+                                                            COUNT(sample_id) as n_expressed,
+                                                    FROM read_parquet('", quant_dir, tissue_type, "/parquet/utrons_expression/*.parquet') 
+                                                    WHERE sample_id NOT LIKE '%NO%' AND 
+                                                          transcript_tpm>",TPM_cutoff," AND 
+                                                          fract_expr>",TX_G_cutoff," ", 
+                                                    "GROUP BY gene_id, transcript_id")) 
+  
+  # Mutate the data.frame to assign its tissue type and condition. Also mutate to calculate the % of samples it is expressed in. 
+  
+  normals = normals %>% mutate(tissue=str_to_sentence(tissue_type), 
+                               condition="Normal",
+                               pct_expressed = n_expressed/n_normal)
+ 
+  cancers = cancers %>% mutate(tissue=str_to_sentence(tissue_type), 
+                               condition="Cancer",
+                               pct_expressed = n_expressed/n_cancer)   
+  
+  # Join then filter for Y% of samples, and 3UI transcripts only.
+  
+  output = rbind(normals, cancers) %>% filter(pct_expressed>=sample_pct,
+                                              transcript_id %in% utrons_ids,)
+  
+  # Because we are taking the intercept we only need it to be in one or other, if it is in both we can just select once
+  
+  output = output %>% dplyr::select(transcript_id, tissue) %>% distinct()
+  
+  # We also need to filter for junction counts (ensure the transcript is supported in this cancer type) we can do this with featureCounts data
+  
+  featureCounts_covered <- dbGetQuery(duckdb_connection, paste0("SELECT transcript_id, COUNT(DISTINCT track) as tracks
+                                          FROM
+                                           (SELECT
+                                                track,
+                                                transcript_id 
+                                        
+                                           FROM
+                                           read_parquet('",quant_dir,tissue_type,"/parquet/featurecounts.jcounts/*.parquet') as pso 
+                                           INNER JOIN non_cds_locations as loc 
+                                              ON pso.site1_chr = loc.contig 
+                                             AND pso.Site1_location = loc.start
+                                             AND pso.Site2_location = loc.end
+                                           
+                                           GROUP BY
+                                           transcript_id, track
+                                           HAVING min(count) > 0 )
+                                        
+                                         GROUP BY transcript_id"))
+  
+  output = output %>% filter(transcript_id %in% featureCounts_covered$transcript_id)
+  
+  return(output)
+  
+}
+```
+
+Do this for each cancer type
+
+```{r}
+total_bladder = getFromDDB("bladder", utrons_ids)
+total_brain = getFromDDB("brain", utrons_ids) 
+total_breast = getFromDDB("breast", utrons_ids) 
+total_cervical = getFromDDB("cervical", utrons_ids) 
+total_colon = getFromDDB("colon", utrons_ids)
+total_head_and_neck = getFromDDB("head_and_neck", utrons_ids) 
+total_kidney = getFromDDB("kidney", utrons_ids)
+total_liver = getFromDDB("Liver", utrons_ids)
+total_lung = getFromDDB("lung", utrons_ids)
+total_ovary = getFromDDB("ovary", utrons_ids)
+total_pancreas = getFromDDB("pancreas", utrons_ids)
+total_prostate = getFromDDB("prostate", utrons_ids)
+total_rectal = getFromDDB("rectal", utrons_ids) 
+total_skin = getFromDDB("skin", utrons_ids) 
+total_thyroid = getFromDDB("thyroid", utrons_ids)
+total_uterus = getFromDDB("uterus", utrons_ids)
+```
+
+Lets merge all the tissues together 
+
+```{r}
+total_all_tissues = rbind(total_bladder, total_brain, total_breast, total_cervical, total_colon, total_head_and_neck, total_kidney, total_liver, total_lung, total_ovary, total_pancreas, total_prostate, total_rectal, total_skin, total_thyroid, total_uterus)
+```
+
+### Plots
+
+Comparing novel and annotated in each tissue
+
+```{r, fig.height=2.5, fig.width=5}
+novel = fread("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.novel_utrons.ids.gz", header=F) %>% select(V1) %>% unlist()
+total_all_tissues %>% 
+  mutate(novel=transcript_id %in% novel,
+         Classification = ifelse(novel, "Novel", "Annotated"),
+         tissue = ifelse(tissue=="Head_and_neck", "Head/Neck", tissue)) %>%
+  ggplot(aes(x=tissue, fill=Classification)) + 
+  geom_bar(col="black", position="dodge") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text = element_text(size=8),
+        axis.text.x = element_text(size=8, angle=30, hjust=1),
+        axis.title = element_text(size=8),
+        strip.text = element_text(size=8),
+        strip.background = element_rect(fill="white"),
+        axis.title.x = element_blank(),
+        legend.position = "none") + 
+  scale_fill_manual(values=c("#999999","orange")) + ylab("Expressed 3UI transcripts")
+ggsave("expression_between_tissues.dir/canc_between_tissue_comp_novel_dodged.png", height=2.5, width=5, units="in")
+```
+
+Comparing how many times a transcript is broadly expressed in a different tissue
+
+```{r, fig.height=2.5, fig.width=2.5}
+n_tissues = total_all_tissues %>% dplyr::select(tissue) %>% distinct() %>% nrow()
+total_all_tissues %>% 
+  mutate(novel=transcript_id %in% novel,
+         Classification = ifelse(novel, "Novel", "Annotated")) %>%
+  group_by(transcript_id, Classification) %>% 
+  summarize(num_tissues_expr = n()) %>%
+  ggplot(aes(x=num_tissues_expr, fill=Classification)) + 
+  geom_bar(col="black", position="dodge") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text = element_text(size=8),
+        axis.title = element_text(size=8),
+        strip.text = element_text(size=8),
+        axis.text.x = element_text(size=7),
+        legend.background = element_rect(fill=alpha("white",0)),
+        legend.position = c(0.6,0.925),
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        #legend.key.height = unit(0.2,"cm")
+        legend.box.margin = margin(-7.5,0,-7.5,0)) + 
+  guides(fill=guide_legend(nrow=1)) + 
+  scale_fill_manual(values=c("#999999","orange")) + 
+  scale_x_continuous(breaks=seq(1,n_tissues,1)) + 
+  labs(x="Number of cancer types",
+       y="Number of expressed 3UI transcripts")
+ggsave("expression_between_tissues.dir/canc_between_tissue_num_tissues.png", height=2.5, width=2.5, units="in")
+```
+
+Print session info for debug
+
+```{r}
+sessionInfo()
+```
+
