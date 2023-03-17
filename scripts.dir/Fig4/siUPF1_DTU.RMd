@@ -1,0 +1,61 @@
+---
+title: "plotting DTU"
+output:
+  html_document:
+    df_print: paged
+---
+
+We will plot fraction expresssion in each condition on each axis, therefore divergence from x=y represents DTU between conditions 
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(ggrepel)
+```
+
+Get expression data
+
+```{r}
+utrons_expression <- fread("../../../../../HCT-NMD_KD/JR_DTU/expression.dir/utrons_expression.txt")
+tidy_expressions <- utrons_expression %>%
+  separate(Sample, into=c("Cellline", "Condition", "Rep")) %>%
+  extract(Condition, into =c("siRNA", "Inh"), regex="(.)(.+)")
+
+
+med_frac <- tidy_expressions %>%
+  group_by(transcript_id, gene_id, siRNA) %>%
+  summarise(tr.expr=median(tr.expr),
+            fract.expr=median(fract.expr))  %>%
+  group_by(gene_id, siRNA) %>%
+  mutate(gene.expr = sum(tr.expr))
+```
+
+
+```{r, fig.height=2.5, fig.width=2.5}
+utrons <- read.delim("../../../../../HCT-NMD_KD/JR_DTU/expression.dir/csvdb_files/all_utrons_ids.txt")
+utrons_med_frac <- filter(med_frac, transcript_id %in% utrons$transcript_id)
+sig_dtu <- read.csv("../../../../../HCT-NMD_KD/JR_DTU/DTU.dir/siDSRed_vs_siUPF1/DTU_comp.csv")
+
+sig_dtu <- mutate(sig_dtu, sigDTUes = sigDTU & abs(flip_effect_size) >=0.05)
+utrons_med_frac %>%
+  left_join(dplyr::select(sig_dtu, transcript_id, SYMBOL, sigDTUes)) %>%
+  replace_na(list(sigDTUes=FALSE)) %>%
+  mutate(fract.expr = (tr.expr+0.1)/(gene.expr+0.1)) %>%
+  group_by(transcript_id) %>%
+  filter(max(tr.expr)>2.5) %>% 
+  pivot_wider(id_cols=c(gene_id, transcript_id, sigDTUes, SYMBOL), 
+              names_from=siRNA,
+              values_from=fract.expr)  %>% 
+  ggplot() + aes(x=R, y=U, label=SYMBOL) +
+  geom_point(size=0.5) +
+  geom_point(data=~subset(.x, sigDTUes==TRUE), size=0.75, col="red") + 
+  theme_bw(base_size=8) +
+  xlab("Tx/Gene in Control") +
+  ylab("Tx/Gene in siUPF1") +
+  coord_fixed() +
+  theme(aspect.ratio=1,
+        axis.text = element_text(size=8))
+ggsave("siUPF1_DTUtrons.png", height=2.5, width=2.5, units="in")
+```

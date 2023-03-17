@@ -1,0 +1,173 @@
+---
+title: "siUPF1 DTE ECDF plots"
+output:
+  html_document:
+    df_print: paged
+---
+
+The purpose of this script is to look at how population classes of 3'UTR spliced transcripts react to UPF1 knockdown
+
+```{r}
+library(DESeq2)
+library(tximport)
+library(dplyr)
+library(stringr)
+```
+
+Load sample names
+
+```{r}
+tx2gene<-read.delim(file='../../../../../HCT-NMD_KD/salmonquant/transcript2geneMap.tsv', 
+                    header = TRUE, sep = '\t', dec = '.')
+
+quant_dir = "../../../../../HCT-NMD_KD/salmonquant/quantification.dir"
+all_files = list.files(quant_dir, pattern="*.sf")
+all_files = file.path(quant_dir,  all_files)
+
+sample_names <- sapply(all_files, function(x) substr(x, 0, nchar(x)-3))
+sample_names <- sapply(sample_names, function(x) substr(x, 32, nchar(x)))
+names(all_files) <- sample_names
+```
+
+Generate sample table, comparing siUPF1 to control
+
+```{r}
+sample_table = data.frame(files=all_files, names=sample_names)
+sample_table = sample_table %>% mutate(condition=ifelse(stringr::str_detect(names, "dsRed"), "siControl", "siUPF1"))
+sample_table$files = as.character(sample_table$files)
+```
+
+Tximport transcript level
+
+```{r}
+txi <- tximport(sample_table$files, type="salmon", tx2gene=tx2gene, txOut=T)
+```
+
+Generate deseq dataset to compare the conditions
+
+```{r}
+dds <- DESeqDataSetFromTximport(txi, sample_table, ~condition)
+```
+
+Run deseq
+
+```{r}
+dds_result = DESeq(dds)
+```
+
+Filter for rows where there is at least 1 count in all samples for at least 1 condition
+
+```{r}
+nrow(dds_result)
+keep = rowSums(counts(dds_result)[,1:8]>1)>=4|rowSums(counts(dds_result)[,9:16]>1)>=4
+sum(keep)
+dds_result = dds_result[keep,]
+nrow(dds_result)
+```
+
+Deseq2 result
+
+```{r}
+dds_result = results(dds_result)
+```
+
+MA plot
+
+```{r}
+plotMA(dds_result)
+```
+
+Filter for utrons
+
+```{r}
+library(data.table)
+utron_ids = fread("../../../all_TCGA/utron_beds.dir/all_tissues_agg-agg-agg.all_utrons.bed") 
+utron_ids = utron_ids %>% dplyr::select(V4) %>% distinct() %>% unlist() %>% unname()
+result_df = as.data.frame(dds_result)
+result_df_has_utron = setDT(result_df, keep.rownames=T) %>%
+  filter(rn %in% utron_ids)
+row.names(result_df_has_utron) = result_df_has_utron$rn
+result_df_has_utron = left_join(result_df_has_utron, tx2gene, by=c("rn"="transcript_id"))
+```
+
+```{r}
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+result_df_has_utron$gene_id = as.character(result_df_has_utron$gene_id)
+result_df_has_utron$symbol = mapIds(org.Hs.eg.db,
+                           keys=result_df_has_utron$gene_id,
+                           column="SYMBOL",
+                           keytype="ENSEMBL",
+                           multiVals="first")
+```
+
+Lets calc stop distance for each of the utrons
+
+```{r}
+stop_codons = fread("../../../all_TCGA/expression.dir/gtf_stop_codons.txt", col.names=c("gene_id", "transcript_id", "symbol", "strand", "stop_codon", "chromosome", "start", "end"))
+splice_sites = fread("../../../all_TCGA/expression.dir/all_splice_sites.txt")
+splice_site_distances <- splice_sites %>%
+  inner_join(result_df_has_utron, by=c("transcript_id"="rn")) %>%
+  inner_join(dplyr::select(stop_codons, transcript_id, start, end)) %>% 
+  mutate(stop_distance = ifelse(strand=="+",
+                            splice_site_start - end,
+                            start - splice_site_end))%>%
+  dplyr::select(transcript_id,
+         splice_site_start,
+         splice_site_end,
+         stop_distance) %>%
+  distinct()
+
+#mutate to give bool for greater than 55
+splice_site_distances = splice_site_distances %>% mutate(`>55nt`=stop_distance>55)
+```
+
+### ECDF plots
+
+```{r}
+library(ggplot2)
+non_cds <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.ids.gz", header=F)
+plot_data = result_df_has_utron %>% inner_join(splice_site_distances, by=c("rn"="transcript_id")) %>%
+  mutate(non_CDS = rn %in% non_cds$V1)
+
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+```
+
+Lets look at cds (PTC) vs non cds (nonPTC)
+
+```{r, fig.height=2.5, fig.width=2.5}
+test_nonPTC = plot_data %>% filter(non_CDS) %>% dplyr::select(log2FoldChange) %>% unlist()
+test_pPTC = plot_data %>% filter(non_CDS==F) %>% dplyr::select(log2FoldChange) %>% unlist()
+test = ks.test(test_nonPTC, test_pPTC)
+plot_data %>% rename(nonPTC=non_CDS)%>%
+ggplot() +
+  aes(x=log2FoldChange, col=nonPTC) + 
+  stat_ecdf() + 
+  coord_cartesian(xlim=c(-5,5)) + 
+  scale_color_manual(values=cbbPalette)+ 
+  theme_bw(base_size = 8) + 
+  theme(legend.position = "top", legend.text = element_text(size=8),
+        axis.text = element_text(size=8)) + ylab("") + xlab("log2FoldChange(siUPF1)")+ 
+  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=1, hjust=0) + 
+  annotate("text", label=paste0("p=",round(test$p.value, 12)), x=-5, y=0.9, hjust=0)
+ggsave("ptc_vs_nonPTC.png", height=2.5, width=2.5, units="in")
+```
+
+Now lets look at predicted nmd sensitive vs non-sensitive for nonPTC 3UIs, i.e. is it a case that <55 go down, >55nt go up, and therefore it balances in the above plot?
+
+```{r, fig.height=2.5, fig.width=2.5}
+over55 = plot_data %>% filter(`>55nt`) %>% dplyr::select(log2FoldChange) %>% unlist()
+under55 = plot_data %>% filter(`>55nt`==F) %>% dplyr::select(log2FoldChange) %>% unlist()
+test = ks.test(over55, under55)
+ggplot(plot_data) +
+  aes(x=log2FoldChange, col=`>55nt`) + 
+  stat_ecdf() + 
+  coord_cartesian(xlim=c(-5,5)) + 
+  scale_color_manual(values=cbbPalette) + 
+  theme_bw(base_size = 8) + 
+  theme(legend.position = "top", legend.text = element_text(size=8),
+        axis.text = element_text(size=8)) + ylab("") + xlab("log2FoldChange(siUPF1)")+ 
+  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=1, hjust=0) + 
+  annotate("text", label=paste0("p=",round(test$p.value,5)), x=-5, y=0.9, hjust=0)
+ggsave("over_vs_under_55.png", width=2.5, height=2.5, units="in")
+```

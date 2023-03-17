@@ -1,0 +1,245 @@
+---
+title: "Analyse rmats output"
+output:
+  html_document:
+    df_print: paged
+---
+
+Analyse RMATS outputs
+
+Load packages
+
+```{r}
+library(stringr)
+library(dplyr)
+library(data.table)
+library(tidyr)
+library(ggplot2)
+```
+
+IncLevelDif= a - b 
+
+a = 0uM
+b = 20uM
+
+If 50% spliced in a, and 100% spliced in b, then incleveldif = 0.5 - 0 = 0.5. Therefore >0 = spliced more, <0 = ret more. 
+
+#Setup
+
+```{r}
+output = fread("../../../../../HCT_CHIR/RMATS/outputs/SIG_RI.MATS.JC.txt")
+output = subset(output, select=which(!duplicated(names(output)))) %>%  transmute(chr=chr,
+            strand=strand,
+            upstreamEE=upstreamEE,
+            downstreamES=downstreamES,
+            IncLevelDifference=IncLevelDifference, 
+            PValue) %>% distinct() %>%
+  mutate(FDR=p.adjust(PValue, method="BH"))
+```
+
+
+```{r}
+table(spliced_more=output[,5]>0)
+```
+This contains PTC and non-PTC 3UIs. How does it compare if we subset based on this
+
+```{r}
+nonPTCs = fread("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz")
+```
+
+Also remove dupes from this so it runs quicker, we only need the 2 coors so get rid of other cols
+
+```{r}
+nonPTCs = nonPTCs %>% transmute(V2=V2, V3=V3) %>% distinct() %>% mutate(nonPTC=T)
+```
+
+Now join together and set NA to FALSE 
+
+```{r}
+unique_nonPTC = left_join(output, nonPTCs, by=c("upstreamEE"="V2", "downstreamES"="V3"))
+unique_nonPTC[is.na(unique_nonPTC)]=F
+```
+
+### IncLevel vs IncLevel (like the DTU plot from Fig4)
+
+```{r, warning=F, message=F}
+library(stringr)
+rmats_output = fread("../../../../../HCT_CHIR/RMATS/outputs/RI.MATS.JC.txt") %>% select(chr=chr,
+            strand=strand,
+            upstreamEE=upstreamEE,
+            downstreamES=downstreamES,
+            IncLevel1=IncLevel1,
+            IncLevel2=IncLevel2,
+            IncLevelDifference) %>% distinct()
+
+list_to_mean = function(list1){
+  unlisted1 = str_split(list1, ",")[[1]] 
+  unlisted1 = unlisted1[!is.na(unlisted1)] %>% 
+    as.numeric() %>% na.omit() %>%
+    mean()
+  return(unlisted1)
+}
+rmats_output = rmats_output %>% rowwise() %>% mutate(mean_1 = list_to_mean(IncLevel1),
+                                      mean_2 = list_to_mean(IncLevel2))
+```
+
+```{r, fig.height=3.5, fig.width=3.5}
+output = fread("../../../../../HCT_CHIR/RMATS/outputs/sig_RI.MATS.JC.txt") %>% select(chr=chr,
+            strand=strand,
+            upstreamEE=upstreamEE,
+            downstreamES=downstreamES) %>% distinct() %>% mutate(sig=T)
+rmats_output = rmats_output %>% left_join(output)
+rmats_output = rmats_output %>% mutate(sig=ifelse(is.na(sig), F, T))
+```
+
+Specifically plot the Wnt components
+
+```{r, fig.height=2.5, fig.width=2.5}
+canonical_wnt_genes = fread("../../../../../HCT_CHIR/RMATS/canonical_wnt_genes.csv")
+tx2gene = fread("../../../all_TCGA/expression.dir/csvdb_files/tx2gene.txt")
+wnt_tx = tx2gene %>% left_join(canonical_wnt_genes, by=c("match_gene_id"="GeneID")) %>% na.omit()
+bed = fread("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.bed.gz")
+wnt_bed = bed %>% left_join(wnt_tx, by=c("V4"="transcript_id")) %>% na.omit()
+
+filter_frame = wnt_bed %>% select(upstreamEE=V2,
+                                  downstreamES=V3,
+                                  wnt_tx_id=V4,
+                                  symbol=symbol) %>% distinct()
+
+library(ggrepel)
+rmats_output %>% 
+  left_join(filter_frame) %>% 
+  filter(!is.na(wnt_tx_id)) %>% select(-wnt_tx_id) %>% distinct() %>%
+  ggplot(aes(x=mean_1, y=mean_2, color=sig, alpha=ifelse(sig, 1, 0.5), label=ifelse(sig, symbol,""))) + geom_point() + scale_color_manual(values=c("black", "red")) + theme_bw(base_size=8) + 
+  theme(legend.position = "none",
+        axis.text = element_text(size=8)) + 
+  labs(x="IncLevel in 0uM",
+       y="IncLevel in 20uM") + geom_abline(intercept = 0, lty=2) + geom_text_repel(size=2.5,col="black", fontface="bold", arrow=arrow(length=unit(0.01, "npc")),max.overlaps =21, segment.size=0.3, segment.color="grey50")+ 
+  annotate("text", x = 0.2,  y=0.875, label="Retained more", fontface="bold", size=2.5) + 
+  annotate("text", x = 0.775,  y=0.175, label="Spliced more", fontface="bold", size=2.5)+
+  annotate("text", x = 0.2,  y=0.825, label="with \u2191 Wnt", fontface="bold", size=2.5) + 
+  annotate("text", x = 0.775,  y=0.125, label="with \u2191 Wnt", fontface="bold", size=2.5)
+
+ggsave("wnt_components_rmats_dotplot.png", height=2.5, width=2.5, units="in")
+```
+
+### Lollipop chart for incLevelDifference (ordered most + to most -)
+
+```{r}
+library(duckdb)
+library(arrow)
+duckdb_connection = dbConnect(duckdb())
+quant_dir  = "../../../all_TCGA/quant/"
+
+wnt = unique_nonPTC %>% filter(nonPTC==T, IncLevelDifference>0) %>% mutate(tempName=paste0(upstreamEE,",",downstreamES))
+
+selection = "chr, strand, upstreamEE, downstreamES, IncLevelDifference, IncLevel1, IncLevel2, PValue"
+getFromDDB = function(tissue_type){
+  dbGetQuery(duckdb_connection, paste0("SELECT ", selection, " FROM read_parquet('", quant_dir, tissue_type, "/parquet/rMATS_ri/*.parquet')")) %>% mutate(tissue=str_to_sentence(tissue_type))
+}
+
+colon_wnt = getFromDDB("colon") %>% 
+  distinct() %>% 
+  mutate(tempName=paste0(upstreamEE, ",", downstreamES)) %>% 
+  filter(tempName %in% wnt$tempName) %>% 
+  rowwise() %>% 
+  mutate(mean_1 = list_to_mean(IncLevel1),
+        mean_2 = list_to_mean(IncLevel2),
+        padj = p.adjust(PValue, method="BH"))
+```
+
+```{r, fig.height=2.5, fig.width=2.5}
+library(forcats)
+
+plotdata = getFromDDB("colon") %>% distinct() %>% mutate(tempName=paste0(upstreamEE,",",downstreamES)) %>%
+  filter(tempName %in% wnt$tempName) %>% distinct() 
+
+more_spliced = plotdata %>% filter(IncLevelDifference<0)
+more_ret = plotdata %>% filter(IncLevelDifference>0)
+
+colon_wnt %>% arrange(-IncLevelDifference) %>% ggplot(aes(x=fct_reorder(tempName, -IncLevelDifference), y=IncLevelDifference, color=IncLevelDifference>0)) + 
+  geom_segment(aes(x=fct_reorder(tempName, -IncLevelDifference), xend=fct_reorder(tempName, -IncLevelDifference), y=0, yend=IncLevelDifference)) + 
+  theme_bw(base_size=8) + 
+  theme(axis.text.x = element_text(color="white"),
+        axis.ticks.x = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.text = element_text(size=8),
+        legend.position = "none") + 
+  labs(x="3UIs overspliced upon Wnt activation",
+       y="IncLevelDifference in Cancer vs Healthy") + 
+  annotate("text", x = 458,  y=-0.075, hjust=1, label="Spliced more", fontface="bold", size=2.5) + 
+  annotate("text", x = 50,  y=0.125, hjust=0,label="Retained more", fontface="bold", size=2.5)+
+  annotate("text", x = 458,  y=-0.1, hjust=1,label="in Cancer", fontface="bold", size=2.5) + 
+  annotate("text", x = 50,  y=0.1, hjust=0,label="in Cancer", fontface="bold", size=2.5) + 
+  annotate("text", x = 50,  y=0.075, hjust=0,label=paste0("(",round(nrow(more_ret)*100/nrow(plotdata), 1), "%)"), fontface="bold", size=2.5) +
+  annotate("text", x = 458,  y=-0.125, hjust=1,label=paste0("(",round(nrow(more_spliced)*100/nrow(plotdata), 1), "%)"), fontface="bold", size=2.5) + 
+  scale_color_manual(values=c("orange", "#999999")) + 
+  geom_vline(xintercept=nrow(colon_wnt)/2, lty=2, color="gray50", alpha=0.5)
+
+ggsave("lollipop_chart_colon_wnt.png", height=2.5, width=2.5, units="in")
+```
+
+
+### Plot colon-vs-healthy vs wnt-manipulation by signature
+
+```{r}
+getFromDDB = function(tissue_type){
+  dbGetQuery(duckdb_connection, paste0("SELECT ", selection, " FROM read_parquet('", quant_dir, tissue_type, "/parquet/rMATS_ri/*.parquet')")) %>% mutate(tissue=str_to_sentence(tissue_type))
+}
+colon = getFromDDB("colon") %>% distinct() %>% mutate(FDR=p.adjust(PValue, method="BH")) %>% filter(FDR<0.05) %>% left_join(nonPTCs, by=c("upstreamEE"="V2", "downstreamES"="V3"))
+colon[is.na(colon)]=F
+colon_summary = colon %>% mutate(more_IR_in_canc = IncLevelDifference>0) %>% group_by(nonPTC) %>% 
+  summarize(retained_more = sum(more_IR_in_canc==T),
+            spliced_more = sum(more_IR_in_canc==F))
+colon_summary = colon_summary %>% pivot_longer(c(retained_more, spliced_more), names_to="direction")
+colon_summary
+
+colon = getFromDDB("colon") %>% distinct() %>% left_join(nonPTCs, by=c("upstreamEE"="V2", "downstreamES"="V3"))
+colon[is.na(colon)]=F
+
+colon_summary = colon %>% mutate(more_IR_in_canc = IncLevelDifference>0) %>% group_by(nonPTC) %>% 
+  summarize(retained_more = sum(more_IR_in_canc==T),
+            spliced_more = sum(more_IR_in_canc==F))
+colon_summary = colon_summary %>% pivot_longer(c(retained_more, spliced_more), names_to="direction")
+colon_summary
+
+output = fread("../../../../../HCT_CHIR/RMATS/outputs/RI.MATS.JC.txt")
+output = subset(output, select=which(!duplicated(names(output)))) %>%  transmute(chr=chr,
+            strand=strand,
+            upstreamEE=upstreamEE,
+            downstreamES=downstreamES,
+            IncLevelDifference=IncLevelDifference) %>% distinct() 
+
+unique_nonPTC = left_join(output, nonPTCs, by=c("upstreamEE"="V2", "downstreamES"="V3"))
+unique_nonPTC[is.na(unique_nonPTC)]=F
+
+final = unique_nonPTC %>% mutate(more_IR_in_treated = IncLevelDifference<0) %>% group_by(nonPTC) %>% 
+  summarize(retained_more = sum(more_IR_in_treated==T),
+            spliced_more = sum(more_IR_in_treated==F)) %>%
+  pivot_longer(c(retained_more, spliced_more), names_to="direction")
+```
+
+```{r, fig.height=2.5, fig.width=2.5}
+colon_summary = colon_summary %>% mutate(tissue="Colon")
+final = final %>% mutate(tissue="Wnt activation")
+final = rbind(final, colon_summary)
+
+final %>% mutate(direction = ifelse(direction=="spliced_more", "Spliced more", "Retained more"),
+                 nonPTC=ifelse(nonPTC==T, "NonPTC", "pPTC")) %>% 
+  ggplot(aes(x=factor(nonPTC, levels=c("pPTC", "NonPTC")),  y=value, fill=factor(direction, levels=c("Retained more", "Spliced more")))) + geom_col(position="fill", col="black") + 
+  theme_bw(base_size = 8) +
+  theme(aspect.ratio = 1.5, 
+        legend.title = element_blank(),
+        axis.text.x = element_text(size=8, angle=0, hjust=0.5),
+        strip.text.x = element_text(size=8),
+        strip.background = element_rect(fill="white"), 
+        legend.position = "top",
+        legend.text = element_text(size=8)) + 
+  scale_fill_manual(values=c("#999999", "orange")) +
+  labs(x="Classification",
+       y="") + 
+  scale_y_continuous(labels=scales::percent) + 
+  facet_wrap(~tissue)
+
+ggsave("colon_vs_wnt_signature.png", height=2.5, width=2.5, units="in")
+```

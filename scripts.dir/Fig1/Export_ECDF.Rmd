@@ -14,10 +14,10 @@ library(dplyr)
 Load files
 
 ```{r}
-tx2gene<-read.delim(file='../expression.dir/tx2gene.tsv', 
+tx2gene<-read.delim(file='../../../../../HCT_FRACTIONS/UTRONS/expression.dir/tx2gene.tsv', 
                     header = TRUE, sep = '\t', dec = '.')
 
-quant_dir = "../quantification.dir"
+quant_dir = "../../../../../HCT_FRACTIONS/UTRONS/quantification.dir"
 all_files = paste0(list.files(quant_dir), "/quant.sf")
 all_files = file.path(quant_dir,  all_files)
 
@@ -75,7 +75,7 @@ Filter for to only have 3UI transcripts, then annotate with gene symbol from the
 ```{r}
 library(data.table)
 
-utron_ids = read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.ids.gz", header=F)
+utron_ids = read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.ids.gz", header=F)
 
 library(dplyr)
 
@@ -131,10 +131,10 @@ fwrite(sig_result_df_has_utron,"utron_sig_DTE_siUPF1.csv")
 Load bed files for each 3UI class, then create a dataframe to allow us to compare classifications.
 
 ```{r}
-all_utrons <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.bed.gz", header=F)
-novel_utrons <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.novel_utrons.bed.gz", header=F)
-partnered_utrons <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.partnered_utrons.bed.gz", header=F)
-non_cds <- read.delim("../../../../../../../utrons/TCGA_GTEx/utrons/all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz", header=F)
+all_utrons <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.bed.gz", header=F)
+novel_utrons <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.novel_utrons.bed.gz", header=F)
+partnered_utrons <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.partnered_utrons.bed.gz", header=F)
+non_cds <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz", header=F)
 
 library(tidyr)
 novel_utrons = tidyr::separate(novel_utrons, V4, c("id", "partner_id"), sep=":")
@@ -158,7 +158,7 @@ We will filter for transcripts which have over 1TPM in either fraction
 library(stringr)
 library(data.table)
 
-expression = fread("../expression.dir/utrons_expression.tsv.gz") 
+expression = fread("../../../../../HCT_FRACTIONS/UTRONS/expression.dir/utrons_expression.tsv.gz") 
 
 nuc_expression = expression %>% 
   filter(str_detect(sample_id, "nuclear")) %>% 

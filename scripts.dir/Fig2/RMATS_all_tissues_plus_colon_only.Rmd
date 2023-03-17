@@ -1,0 +1,195 @@
+---
+title: "Compare RMATS RI outputs between all tissues normal vs cancer"
+output:
+  html_document:
+    df_print: paged
+---
+
+This purpose of this script is to compare intron retention/splicing between normal and cancer samples across all tissues analysed as part of our pipeline. 
+
+Things to note:
+
+* as part of the RMATS config, in this pipeline b1=cancer and b2=normal
+* IncLevelDifference = average(inclusion_in_b1)-average(inclusion_in_b2)
+* therefore IncLevelDifference>0 = more retention in cancer, IncLevelDifference<0 = more splicing in cancer
+
+Load libraries
+
+```{r message = FALSE, warning = FALSE}
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(tidyr)
+library(duckdb)
+library(arrow)
+library(stringr)
+```
+Create DuckDB connection
+
+```{r}
+duckdb_connection = dbConnect(duckdb())
+```
+
+We will analyse data based on "Junction Count" (JC) differences as opposed to "Junction Count + Exon Count" (JCEC)
+
+```{r}
+quant_dir  = "../../../all_TCGA/quant/"
+selection = "ID, GeneID, geneSymbol, chr, strand, upstreamEE, downstreamES, IncLevelDifference, FDR"
+getFromDDB = function(tissue_type){
+  dbGetQuery(duckdb_connection, paste0("SELECT ", selection, " FROM read_parquet('", quant_dir, tissue_type, "/parquet/rMATS_ri/*.parquet')")) %>% mutate(tissue=str_to_sentence(tissue_type))
+}
+
+bladder = getFromDDB("bladder")
+brain = getFromDDB("brain")
+breast = getFromDDB("breast")
+cervical = getFromDDB("cervical")
+colon = getFromDDB("colon")
+head_and_neck = getFromDDB("head_and_neck")
+kidney = getFromDDB("kidney")
+liver = getFromDDB("Liver")
+lung = getFromDDB("lung")
+pancreas = getFromDDB("pancreas")
+prostate = getFromDDB("prostate")
+rectal = getFromDDB("rectal")
+skin = getFromDDB("skin")
+stomach = getFromDDB("stomach")
+thyroid = getFromDDB("thyroid")
+uterus = getFromDDB("uterus")
+```
+
+We want to merge these into a single data table.
+
+There are a lot of instances where the upstream/downstream exons are slightly larger/smaller but the intron retention event (and JC) is the same. Seeing as we are interested in this at a junction level, we can ignore these columns and call distinct to remove duplicates so we only have 1 row per IR event per tissue. 
+
+```{r}
+all_tissue = rbind(bladder, brain, breast, cervical, colon, head_and_neck, kidney, liver, lung, pancreas, prostate, rectal, skin, stomach, thyroid, uterus) %>% 
+  transmute(chr=chr,
+            strand=strand,
+            upstreamEE=upstreamEE,
+            downstreamES=downstreamES,
+            IncLevelDifference=IncLevelDifference,
+            FDR=FDR,
+            tissue=tissue) %>% distinct()
+rm(bladder, brain, breast, cervical, colon, kidney, liver, lung, ovary, prostate, skin, stomach, thyroid, uterus, head_and_neck, pancreas, rectal)
+```
+
+We want to mutate to create a column stating whether there is increased IR in cancer
+
+```{r}
+all_tissue = all_tissue %>% mutate(more_IR_in_cancer=IncLevelDifference>0)
+```
+
+Now lets create a simple table to show true vs false compared between tissues 
+
+```{r}
+all_tissue %>% na.omit() %>%group_by(tissue) %>% summarize(retained_more = sum(more_IR_in_cancer==T),
+                                              spliced_more = sum(more_IR_in_cancer==F))
+```
+
+How does this compare with non_PTC 3UIs 
+
+```{r}
+#read in nonPTC bed file and just isolate the intron coords
+#set nonPTC to true
+nonPTCs = fread("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.bed.gz") %>% transmute(chr=V1, strand=V6,upstreamEE=V2, downstreamES=V3, nonPTC=T) %>% distinct()
+#join with all tissues, nonPTC will set to T, any which are F will be set to NA
+all_tissue = left_join(all_tissue, nonPTCs) %>% distinct()
+#set NAs to F
+all_tissue[is.na(all_tissue)]=F
+```
+
+Summarize again but subset for nonPTCs
+
+```{r}
+all_tissue %>% group_by(tissue, nonPTC) %>% summarize(retained_more = sum(more_IR_in_cancer==T),
+                                                      spliced_more = sum(more_IR_in_cancer==F))
+```
+
+Lets plot this
+
+```{r, fig.width=5, fig.height=3.5}
+all_tissue %>% 
+  filter(FDR<0.05) %>%
+  filter(abs(IncLevelDifference)>0.05) %>%
+  group_by(tissue, nonPTC) %>% summarize(retained_more = sum(more_IR_in_cancer==T),
+                                                      spliced_more = sum(more_IR_in_cancer==F)) %>%
+    pivot_longer(c(retained_more, spliced_more), names_to="direction") %>%
+  mutate(direction=ifelse(direction=="retained_more", "\U2191 Retention", "\U2191 Splicing"),
+         nonPTC=ifelse(nonPTC==T, "nonPTC", "pPTC"),
+         tissue=ifelse(tissue=="Head_and_neck", "Head/Neck", tissue)) %>%
+  filter(tissue!="Skin") %>% 
+  ggplot(aes(x=factor(nonPTC, levels=c("pPTC", "nonPTC")),  y=value, fill=factor(direction, levels=c("\U2191 Retention", "\U2191 Splicing")))) + geom_col(position="fill") + 
+  facet_wrap(~tissue, nrow = 3) + 
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        axis.text.x = element_text(size=8),
+        axis.text = element_text(size=8),
+        axis.title.x=element_text(size=8),
+        strip.text.x = element_text(size=7.5),
+        strip.background = element_rect(fill="white"),
+        legend.text = element_text(size=8),
+        legend.position="top",
+        legend.box.margin = margin(-7.5,0,-7.5,0),
+        legend.key.height = unit(0.2,"cm")) + 
+  scale_fill_manual(values=c("#999999", "orange")) +
+  labs(x="Classification",
+       y="") + 
+  scale_y_continuous(labels=scales::percent) + 
+  geom_hline(yintercept = 0.5, lty=2, col="black") 
+ggsave("significant_splicing_between_tissues.png", width=5, height=3.5, units="in")
+```
+
+Lets also create a plot just for colon for Figure 2 
+
+```{r}
+library(eply)
+colon = dbGetQuery(duckdb_connection, "SELECT DISTINCT GeneID, geneSymbol, chr, strand, upstreamEE, downstreamES, IncLevelDifference 
+                                       FROM read_parquet('../TCGA_GTEx/utrons/all_TCGA/quant/colon/parquet/rMATS_ri/*.parquet')
+                                       WHERE FDR < 0.05")
+colon$GeneID = unquote(colon$GeneID)
+colon$geneSymbol = unquote(colon$geneSymbol)
+colon = left_join(colon, class) %>% distinct()
+
+colon_summary = colon %>% mutate(tempName = paste0(chr,",",strand,",",upstreamEE,",",downstreamES)) %>%
+    group_by(tempName,IncLevelDifference) %>%
+  summarize(GeneID = ifelse(dplyr::first(match_gene_id)=="",dplyr::nth(n=2,match_gene_id),dplyr::first(match_gene_id))) %>% 
+  ungroup() %>% transmute(tempName = tempName, GeneID=GeneID, IncLevelDifference=IncLevelDifference)
+```
+
+```{r}
+library(org.Hs.eg.db)
+colon_summary$symbol = mapIds(org.Hs.eg.db,
+                              keys=colon_summary$GeneID,
+                              keytype = "ENSEMBL",
+                              column="SYMBOL",
+                              multiVals = "first")
+```
+Plot this 
+
+```{r, fig.height=3.5, fig.width=2.5}
+library(ggrepel)
+label_me = c(1, 2, 3, 4, 5, 10, 12, 14, 36, 340,339,335,330,322)
+plot_data = colon_summary %>% left_join(nonPTCs) %>% 
+  filter(nonPTC) %>%
+  arrange(IncLevelDifference) %>%
+  mutate(position = row_number(),
+         label=position%in%label_me)
+
+plot_data %>% ggplot(aes(x=fct_reorder(tempName, -IncLevelDifference), 
+             y=IncLevelDifference, 
+             color=abs(IncLevelDifference)>0.05,
+             label=ifelse(label==T&abs(IncLevelDifference)>0.05, symbol,""))) +
+  geom_point(size=0.5) + 
+  coord_flip() +
+  theme_bw(base_size=8) + 
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(size=8),
+        axis.title = element_text(size=8),
+        panel.grid.major.y = element_blank(),
+        legend.position = "none",
+        axis.ticks.y=element_blank()) +
+  xlab("Differential 3UI splicing events") + 
+  scale_color_manual(values=c("#999999", "orange")) + ylim(-0.5, 0.5) + 
+  geom_text_repel(size=2,col="black", arrow=arrow(length=unit(0.01, "npc")),max.overlaps =Inf, segment.size=0.3, segment.color="grey50", box.padding = 0.5, fontface="bold", alpha=1, min.segment.length = unit(0, 'lines'))
+ggsave("over_vs_undersplicing_coad.png", width=2.5, height=3.5, units = "in")
+```
