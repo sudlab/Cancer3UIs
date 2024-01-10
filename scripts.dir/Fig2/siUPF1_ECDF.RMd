@@ -126,7 +126,7 @@ splice_site_distances = splice_site_distances %>% mutate(`>55nt`=stop_distance>5
 
 ```{r}
 library(ggplot2)
-non_cds <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.ids.gz", header=F)
+non_cds <- read.delim("../../../../../Cell_lines/CCLE/new_utrons_classification/utron_beds.dir/agg-agg-agg.no_cds.ids.gz", header=F)
 plot_data = result_df_has_utron %>% inner_join(splice_site_distances, by=c("rn"="transcript_id")) %>%
   mutate(non_CDS = rn %in% non_cds$V1)
 
@@ -135,39 +135,72 @@ cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2"
 
 Lets look at cds (PTC) vs non cds (nonPTC)
 
-```{r, fig.height=2.5, fig.width=2.5}
-test_nonPTC = plot_data %>% filter(non_CDS) %>% dplyr::select(log2FoldChange) %>% unlist()
-test_pPTC = plot_data %>% filter(non_CDS==F) %>% dplyr::select(log2FoldChange) %>% unlist()
-test = ks.test(test_nonPTC, test_pPTC)
-plot_data %>% rename(nonPTC=non_CDS)%>%
-ggplot() +
-  aes(x=log2FoldChange, col=nonPTC) + 
-  stat_ecdf() + 
-  coord_cartesian(xlim=c(-5,5)) + 
-  scale_color_manual(values=cbbPalette)+ 
-  theme_bw(base_size = 8) + 
-  theme(legend.position = "top", legend.text = element_text(size=8),
-        axis.text = element_text(size=8)) + ylab("") + xlab("log2FoldChange(siUPF1)")+ 
-  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=1, hjust=0) + 
-  annotate("text", label=paste0("p=",round(test$p.value, 12)), x=-5, y=0.9, hjust=0)
-ggsave("ptc_vs_nonPTC.png", height=2.5, width=2.5, units="in")
-```
-
-Now lets look at predicted nmd sensitive vs non-sensitive for nonPTC 3UIs, i.e. is it a case that <55 go down, >55nt go up, and therefore it balances in the above plot?
-
-```{r, fig.height=2.5, fig.width=2.5}
+```{r, fig.height=2, fig.width=2}
 over55 = plot_data %>% filter(`>55nt`) %>% dplyr::select(log2FoldChange) %>% unlist()
 under55 = plot_data %>% filter(`>55nt`==F) %>% dplyr::select(log2FoldChange) %>% unlist()
 test = ks.test(over55, under55)
-ggplot(plot_data) +
-  aes(x=log2FoldChange, col=`>55nt`) + 
+plot_data %>% mutate(class = ifelse(`>55nt`, ">55nt", "<55nt")) %>%
+ggplot() +
+  aes(x=log2FoldChange, col=class) + 
   stat_ecdf() + 
   coord_cartesian(xlim=c(-5,5)) + 
   scale_color_manual(values=cbbPalette) + 
   theme_bw(base_size = 8) + 
-  theme(legend.position = "top", legend.text = element_text(size=8),
+  theme(legend.position = "top", 
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
         axis.text = element_text(size=8)) + ylab("") + xlab("log2FoldChange(siUPF1)")+ 
-  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=1, hjust=0) + 
-  annotate("text", label=paste0("p=",round(test$p.value,5)), x=-5, y=0.9, hjust=0)
-ggsave("over_vs_under_55.png", width=2.5, height=2.5, units="in")
+  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=0.95, hjust=0) + 
+  annotate("text", label=paste0("p=",round(test$p.value,5)), x=-5, y=0.8, hjust=0) -> saveme
+png("over_vs_under_55.png", width=2, height=2, units="in", res=1200)
+saveme
+dev.off()
+```
+
+Now lets look at predicted nmd sensitive vs non-sensitive for nonPTC 3UIs, i.e. is it a case that <55 go down, >55nt go up, and therefore it balances in the above plot?
+
+```{r, fig.height=2, fig.width=2}
+library(RSQLite)
+biotypes <- dbGetQuery(dbConnect(SQLite(), "../../General/annotations/hg38_noalt_ensembl85/csvdb"),
+                          "SELECT DISTINCT transcript_id, transcript_biotype FROM transcript_info")
+
+all_utrons <- read.delim("../../../../../Cell_lines/CCLE/new_utrons_classification/utron_beds.dir/agg-agg-agg.all_utrons.ids.gz", header=F)
+novel_utrons <- read.delim("../../../../../Cell_lines/CCLE/new_utrons_classification/utron_beds.dir/agg-agg-agg.novel_utrons.ids.gz", header=F)
+partnered_utrons <- read.delim("../../../../../Cell_lines/CCLE/new_utrons_classification/utron_beds.dir/agg-agg-agg.partnered_utrons.ids.gz", header=F)
+non_cds <- read.delim("../../../../../Cell_lines/CCLE/new_utrons_classification/utron_beds.dir/agg-agg-agg.no_cds.ids.gz", header=F)
+
+utron_annotation <- data.frame(  transcript_id = result_df$rn) %>%
+  mutate(utron = transcript_id %in% all_utrons$V1,
+         novel_utron = transcript_id %in% novel_utrons$V1,
+         partnered_utron = transcript_id %in% partnered_utrons$V1,
+         non_cds = transcript_id %in% non_cds$V1)
+
+plot_data = result_df %>% inner_join(utron_annotation, by=c("rn"="transcript_id")) %>%
+  left_join(biotypes, by=c("rn"="transcript_id")) %>%
+  mutate(transcript_biotype = ifelse(is.na(transcript_biotype), "Novel", transcript_biotype)) %>%
+  mutate(category=ifelse(transcript_biotype=="protein_coding" & ! utron, "Coding",
+                         ifelse((transcript_biotype == "nonsense_mediated_decay" | utron) & !non_cds, "NMD",
+                         ifelse(non_cds, "nPTC", NA))))
+
+test_nonPTC = plot_data %>% filter(non_cds) %>% dplyr::select(log2FoldChange) %>% unlist()
+test_pPTC = plot_data %>% filter(non_cds==F) %>% dplyr::select(log2FoldChange) %>% unlist()
+test = ks.test(test_nonPTC, test_pPTC)
+
+plot_data %>% filter(category!="NA") %>%
+  ggplot() +
+  aes(x=log2FoldChange, col=category) + 
+  stat_ecdf() + 
+  coord_cartesian(xlim=c(-5,5)) + 
+  scale_color_manual(values=cbbPalette)+ 
+  theme_bw(base_size = 8) + 
+  theme(legend.position = "top", 
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(size=8),
+        legend.key.width = unit(3,"mm")) + ylab("") + xlab("log2FoldChange(siUPF1)")+ 
+  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=0.95, hjust=0) + 
+  annotate("text", label=paste0("p=",round(test$p.value, 12)), x=-5, y=0.8, hjust=0) -> saveme
+png("ptc_vs_nonPTC.png", height=2, width=2, units="in", res=1200)
+saveme
+dev.off()
 ```

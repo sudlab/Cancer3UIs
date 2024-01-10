@@ -1,0 +1,486 @@
+---
+title: "Using mean PSI instead of utroniness"
+output: html_notebook
+---
+
+The Utroniness measure suffers from the problem that it is not independent of the
+total expression in a sample. One way to solve that might be to use the PSI measurements
+instead, as these are indeivdually normalised to gene expression, and I think that
+they are also shruken. Its unclear what summary stateistic to use, but lets try starting with mean. 
+
+
+```{r}
+library(tidyverse)
+all_utrons <- read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.all_utrons.ids.gz", header=F,
+                         col.names = "transcript_id")
+all_utrons$non_cds <- all_utrons$transcript_id %in% read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.ids.gz",
+                                                               header=FALSE,
+                                                               col.names=c("transcript_id", "match_id"))$transcript_id
+all_utrons$novel <- all_utrons$transcript_id %in% read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.novel_utrons.ids.gz",
+                                                               header=FALSE,
+                                                               col.names=c("transcript_id", "match_id"))$transcript_id
+all_utrons$match_id <- all_utrons$transcript_id %in% read.delim("../../../all_TCGA/new_classification/utron_beds.dir/agg-agg-agg.no_cds.ids.gz",
+                                                               header=FALSE,
+                                                               col.names=c("transcript_id", "match_id"))$match_id
+```
+
+```{r}
+library(duckdb)
+db <- dbConnect(duckdb())
+duckdb_register(db, "utrons", all_utrons)
+utroniness <- dbGetQuery(db,
+                         "SELECT distinct_pso.track, non_cds, condition,  AVG(IFNULL(1-PSI,0)) as utroniness
+                         FROM
+                         (SELECT DISTINCT track, non_cds, condition, start, \"end\", strand, psi
+                         FROM read_parquet('../../../all_TCGA/quant/colon/parquet/rmats_junction_counts/*.parquet') as pso
+                           LEFT JOIN utrons ON utrons.transcript_id = pso.transcript_id
+                         WHERE  (spliced_reads + retained_reads) > 0 ) as distinct_pso
+                         GROUP BY
+                         track, non_cds, condition
+                         ")
+dbDisconnect(db, shutdown=TRUE)
+utroniness %>%
+  mutate(normal=ifelse(grepl("test", condition), "Cancer", "Normal")) %>%
+  ggplot() + aes(utroniness) +
+  facet_grid(normal~non_cds) +
+  geom_density()
+```
+
+
+
+```{r}
+
+db <- dbConnect(duckdb())
+gene_tpms <- dbGetQuery(db,
+                         "SELECT DISTINCT
+                            sample_id, 
+                            gene_id,
+                            gene_tpm
+                         FROM 
+                           read_parquet('../../../all_TCGA/quant/colon/parquet/utrons_expression/*.parquet')",
+                         )
+dbDisconnect(db, shutdown=TRUE)
+
+total_tpm <- gene_tpms %>%
+  mutate(sample_id = gsub(".", "-", sample_id, fixed=T)) %>%
+  group_by(sample_id) %>%
+  summarise(total_tpm=sum(gene_tpm, na.rm=T))
+```
+
+```{r}
+utroniness %>%
+  inner_join(total_tpm, by=c("track"="sample_id")) %>% 
+  ggplot() + aes(y=utroniness, x=total_tpm) +
+  geom_point() +
+  stat_smooth(method="lm") +
+  facet_grid(non_cds ~ condition) +
+  theme_bw()
+
+```
+
+
+Lets start by looking at the correlations. Starting with UPF1.
+
+
+```{r}
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+tx2gene <- distinct(AnnotationDbi::select(org.Hs.eg.db, gene_tpms$gene_id, keytype = "ENSEMBL", columns = "SYMBOL"))
+gene_tpms %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  inner_join(filter(tx2gene, SYMBOL=="UPF1"), by=c("gene_id"="ENSEMBL")) %>%
+  inner_join(utroniness, by=c("sample_id"="track"), relationship="many-to-many") %>%
+  group_by(gene_id, non_cds, condition) %>%
+  do(with(., cor.test(utroniness, gene_tpm, method="spearman", exact=F)) %>% broom::tidy()) 
+```
+
+```{r}
+gene_tpms %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  inner_join(utroniness, by=c("sample_id"="track"), relationship="many-to-many") %>%
+  group_by(gene_id, non_cds, condition) %>%
+  filter(sd(utroniness) > 0, sd(gene_tpm) > 0) %>%
+  do(with(., cor.test(utroniness, gene_tpm, method="spearman", exact=F)) %>% broom::tidy()) %>%
+  left_join(tx2gene, by=c("gene_id"="ENSEMBL")) -> correlations
+
+correlations %>%
+  mutate(non_cds=ifelse(non_cds, "nonPTC", "pPTC"),
+         condition=ifelse(condition == "test", "Cancer", "Normal"),
+         FDR=ifelse(p.adjust(p.value, method="BH") < 0.05, "<0.05", "NS")) %>%
+  ggplot() + aes(estimate, fill=FDR) +
+  geom_histogram() +
+  facet_grid(condition ~ non_cds) +
+  geom_vline(xintercept = 0, lty=2, col="grey25") +
+  xlab(expression(paste("Spearman's ", rho))) +
+  theme_bw()
+```
+
+```{r}
+correlations %>%
+  filter(non_cds, condition=="test") %>%
+  dplyr::select(SYMBOL, condition, estimate, p.value) %>%
+  arrange(desc(estimate)) %>% head(n=100)
+
+```
+
+```{r}
+correlations %>%
+  filter(grepl("UPF", SYMBOL) | grepl("SMG", SYMBOL)) %>%
+  dplyr::select(SYMBOL, non_cds, condition, estimate, p.value)
+
+```
+
+
+The general negative correlations between genes and utroniness is puzzling. But one possibility is that
+there is some highly expressed gene that is correlated with utroniness, that is absorbing
+counts, and thus depressing the counts of every thing else. We could try using DESeq normalisation to deal
+with this. 
+
+In DESeq normalisation, we calculate a pseudo reference, by taking the gemetric mean
+of expression for each gene. 
+
+```{r}
+normed_tpm <- 
+  gene_tpms %>%
+  group_by(gene_id) %>%
+  summarize(geoMean=exp(mean(log(gene_tpm)))) %>%
+  right_join(gene_tpms) %>% 
+  group_by(sample_id) %>%
+  summarize(normFactor = median(gene_tpm/geoMean, na.rm=T)) %>% 
+  left_join(gene_tpms) %>%
+  mutate(normed_tpm=gene_tpm/normFactor)
+
+```
+
+```{r}
+normed_tpm %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  inner_join(utroniness, by=c("sample_id"="track"), relationship="many-to-many") %>%
+  group_by(gene_id, non_cds, condition) %>%
+  filter(sd(utroniness) > 0, sd(gene_tpm) > 0) %>%
+  do(with(., cor.test(utroniness, normed_tpm, method="spearman", exact=F)) %>% broom::tidy()) %>%
+  left_join(tx2gene, by=c("gene_id"="ENSEMBL")) -> norm_correlations
+
+norm_correlations %>%
+  mutate(non_cds=ifelse(non_cds, "nonPTC", "pPTC"),
+         condition=ifelse(condition == "test", "Cancer", "Normal"),
+         FDR=ifelse(p.adjust(p.value, method="BH") < 0.05, "<0.05", "NS")) %>%
+  ggplot() + aes(estimate, fill=FDR) +
+  geom_histogram() +
+  facet_grid(condition ~ non_cds) +
+  geom_vline(xintercept = 0, lty=2, col="grey25") +
+  xlab(expression(paste("Spearman's ", rho))) +
+  theme_bw()
+
+```
+
+This is much closer to the expected distributin of correlation coefficients. What does this look like for the 
+NMD factors?
+
+```{r}
+norm_correlations %>%
+  mutate(FDR=p.adjust(p.value, method="BH")) %>%
+  filter(grepl("^UPF", SYMBOL) | grepl("^SMG", SYMBOL)) %>%
+  dplyr::select(SYMBOL, non_cds, condition, estimate, FDR)
+
+```
+```{r, fig.height=3, fig.width=3}
+norm_correlations %>%
+  ungroup() %>%
+  mutate(FDR=p.adjust(p.value, method="BH"),
+         non_cds=ifelse(non_cds, "nPTC", "pPTC"),
+         condition=ifelse(condition=="test", "Cancer", "Normal"),
+         category=paste(condition, non_cds)) %>%
+  filter(grepl("^UPF", SYMBOL) | grepl("^SMG", SYMBOL)) %>%
+  dplyr::select(SYMBOL, category, estimate) %>%
+  pivot_wider(values_from=estimate, id_cols=SYMBOL, names_from=category) %>%
+  as.data.frame() -> nmd_matrix
+
+rownames(nmd_matrix) <- nmd_matrix$SYMBOL
+nmd_matrix <- as.matrix(nmd_matrix[,-1])
+
+library(ComplexHeatmap)
+Heatmap(nmd_matrix,
+        col=circlize::colorRamp2(c(-0.5,0,0.5), c("Blue", "White", "Red")),
+        row_names_gp = grid::gpar(fontsize=8),
+        column_names_gp = grid::gpar(fontsize=8),
+        column_names_rot=45,
+        name=" ",
+) -> saveme
+png("NMD_components_PSI_correlations.png", height=3, width=3, units="in", res=1200)
+saveme
+dev.off()
+```
+
+```{r, fig.height=3, fig.width=3}
+x = normed_tpm %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  filter(gene_id=="ENSG00000005007") %>% #filter for UPF1
+  inner_join(utroniness, by=c("sample_id"="track")) %>%
+  group_by(gene_id, non_cds, condition) %>%
+  filter(sd(utroniness) > 0, sd(gene_tpm) > 0) %>% 
+  mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"))
+
+stats_data = norm_correlations %>% 
+  mutate(padj = p.adjust(p.value, method="BH")) %>%
+  filter(gene_id == "ENSG00000005007") %>% 
+  mutate(label = paste0("R=", round(estimate,2), ",\npadj=", formatC(padj, format="e", digits=2))) %>%
+           mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"),
+            x=40, 
+            y=ifelse(non_cds=="nPTC", 0.325, 0.675))
+x$condition = factor(x$condition, levels=c("Normal", "Cancer"))
+x$non_cds = factor(x$non_cds, levels=c("pPTC", "nPTC"))
+
+x %>%  
+  ggplot(aes(x=normed_tpm, y=utroniness)) + 
+  geom_point(color="#999999", alpha=0.75) + 
+  geom_smooth(method="lm", color="black") +
+  facet_grid(vars(factor(non_cds, levels=c("pPTC", "nPTC") )), vars(factor(condition, levels=c("Normal", "Cancer"))), scales="free_y") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text=element_text(size=8),
+        axis.title=element_text(size=8),
+        strip.background=element_rect(fill="white"),
+        strip.text=element_text(size=8)) + 
+  xlab("UPF1 Expression") +
+  ylab("Average 3UI PSI per sample") + 
+  geom_text(data = stats_data, mapping = aes(label=label, x=x, y=y), size=3, hjust=0.5, vjust=0.5, nudge_y = 0.005) -> saveme
+png("UPF1_comparison_PSI_correlations.png", height=3, width=3, units="in", res=1200)
+saveme
+dev.off()
+```
+
+```{r}
+#save.image("PSI_correlations_temp.RData")
+load("PSI_correlations_temp.RData")
+```
+
+
+### Plots for paper
+
+```{r, fig.height=3, fig.width=3}
+norm_correlations %>%
+  ungroup() %>%
+  mutate(FDR=p.adjust(p.value, method="BH"),
+         non_cds=ifelse(non_cds, "nPTC", "pPTC"),
+         condition=ifelse(condition=="test", "Cancer", "Normal"),
+         category=paste(condition, non_cds)) %>%
+  filter(grepl("^UPF", SYMBOL) | grepl("^SMG", SYMBOL)) %>%
+  dplyr::select(SYMBOL, category, estimate) %>%
+  pivot_wider(values_from=estimate, id_cols=SYMBOL, names_from=category) %>%
+  as.data.frame() -> nmd_matrix
+
+rownames(nmd_matrix) <- nmd_matrix$SYMBOL
+nmd_matrix <- as.matrix(nmd_matrix[,-1])
+
+library(ComplexHeatmap)
+Heatmap(nmd_matrix,
+        col=circlize::colorRamp2(c(-0.5,0,0.5), c("Blue", "White", "Red")),
+        row_names_gp = grid::gpar(fontsize=8),
+        column_names_gp = grid::gpar(fontsize=8),
+        column_names_rot=45,
+        name=" ",
+) -> saveme
+png("NMD_components_PSI_correlations.png", height=3, width=3, units="in", res=1200)
+saveme
+dev.off()
+```
+
+### UPF1 
+
+nPTC and pPTC
+
+```{r, fig.height=3, fig.width=3}
+x = normed_tpm %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  filter(gene_id=="ENSG00000005007") %>% #filter for UPF1
+  inner_join(utroniness, by=c("sample_id"="track")) %>%
+  group_by(gene_id, non_cds, condition) %>%
+  filter(sd(utroniness) > 0, sd(gene_tpm) > 0) %>% 
+  mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"))
+
+stats_data = norm_correlations %>% 
+  mutate(padj = p.adjust(p.value, method="BH")) %>%
+  filter(gene_id == "ENSG00000005007") %>% 
+  mutate(label = paste0("R=", round(estimate,2), ",\npadj=", formatC(padj, format="e", digits=2))) %>%
+           mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"),
+            x=ifelse(condition=="Normal",30,40), 
+            y=ifelse(non_cds=="nPTC", 0.325, 0.675))
+x$condition = factor(x$condition, levels=c("Normal", "Cancer"))
+x$non_cds = factor(x$non_cds, levels=c("pPTC", "nPTC"))
+
+x %>%  
+  ggplot(aes(x=normed_tpm, y=utroniness)) + 
+  geom_point(color="#999999", alpha=0.75) + 
+  geom_smooth(method="lm", color="black") +
+  facet_grid(vars(factor(non_cds, levels=c("pPTC", "nPTC") )), vars(factor(condition, levels=c("Normal", "Cancer"))), scales="free") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text=element_text(size=8),
+        axis.title=element_text(size=8),
+        strip.background=element_rect(fill="white"),
+        strip.text=element_text(size=8)) + 
+  xlab("UPF1 Expression") +
+  ylab("Average 3UI PSO per sample") + 
+  geom_text(data = stats_data, mapping = aes(label=label, x=x, y=y), size=3, hjust=0.5, vjust=0.5, nudge_y = 0.005) -> saveme
+png("UPF1_comparison_PSI_correlations_both.png", height=3, width=3, units="in", res=1200)
+saveme
+dev.off()
+```
+
+nPTC only
+
+```{r, fig.height=2, fig.width=2}
+stats_data = norm_correlations %>% 
+  filter(non_cds) %>%
+  mutate(padj = p.adjust(p.value, method="BH")) %>%
+  filter(gene_id == "ENSG00000005007") %>% 
+  mutate(label = paste0("R=", round(estimate,2), ",padj=", formatC(padj, format="e", digits=2))) %>%
+           mutate(condition=ifelse(condition=="normal", "UPF1 - Normal", "UPF1 - Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"),
+            x=ifelse(condition=="UPF1 - Cancer", 0, 10), 
+            y=ifelse(condition=="UPF1 - Cancer", 0.325, 0.4125))
+
+x %>%  
+  filter(non_cds=="nPTC") %>%
+  mutate(condition=ifelse(condition=="Normal", "UPF1 - Normal", "UPF1 - Cancer")) %>%
+  ggplot(aes(x=normed_tpm, y=utroniness)) + 
+  geom_point(color="#999999", alpha=0.5) + 
+  geom_smooth(method="lm", color="black") +
+  facet_wrap(vars(factor(condition, levels=c("UPF1 - Normal", "UPF1 - Cancer"))), nrow=2, scales = "free") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text=element_text(size=8),
+        axis.text.y=element_text(size=7),
+        axis.title=element_text(size=8),
+        strip.background=element_rect(fill="white"),
+        strip.text=element_text(size=8)) + 
+  xlab("UPF1 Expression") +
+  ylab("Average 3UI PSO per sample") + 
+  geom_text(data = stats_data, mapping = aes(label=label, x=x, y=y), size=3, hjust=0, vjust=0.5, nudge_y = 0.005) -> saveme
+png("UPF1_comparison_PSI_correlations_nPTC_only.png", height=2, width=2, units="in", res=1200)
+saveme
+dev.off()
+```
+### UPF3B
+
+ENSG00000125351
+
+nPTC and pPTC
+
+```{r, fig.height=3, fig.width=3}
+x = normed_tpm %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  filter(gene_id=="ENSG00000125351") %>% #filter for UPF1
+  inner_join(utroniness, by=c("sample_id"="track")) %>%
+  group_by(gene_id, non_cds, condition) %>%
+  filter(sd(utroniness) > 0, sd(gene_tpm) > 0) %>% 
+  mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"))
+
+stats_data = norm_correlations %>% 
+  mutate(padj = p.adjust(p.value, method="BH")) %>%
+  filter(gene_id == "ENSG00000125351") %>% 
+  mutate(label = paste0("R=", round(estimate,2), ",\npadj=", formatC(padj, format="e", digits=2))) %>%
+           mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"),
+            x=ifelse(condition=="Normal",6,15), 
+            y=ifelse(non_cds=="nPTC", 0.325, 0.675))
+x$condition = factor(x$condition, levels=c("Normal", "Cancer"))
+x$non_cds = factor(x$non_cds, levels=c("pPTC", "nPTC"))
+
+x %>%  
+  ggplot(aes(x=normed_tpm, y=utroniness)) + 
+  geom_point(color="#999999", alpha=0.75) + 
+  geom_smooth(method="lm", color="black") +
+  facet_grid(vars(factor(non_cds, levels=c("pPTC", "nPTC") )), vars(factor(condition, levels=c("Normal", "Cancer"))), scales="free") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text=element_text(size=8),
+        axis.title=element_text(size=8),
+        strip.background=element_rect(fill="white"),
+        strip.text=element_text(size=8)) + 
+  xlab("UPF3B Expression") +
+  ylab("Average 3UI PSO per sample") + 
+  geom_text(data = stats_data, mapping = aes(label=label, x=x, y=y), size=3, hjust=0.5, vjust=0.5, nudge_y = 0.005) -> saveme
+png("UPF3B_comparison_PSI_correlations_both.png", height=3, width=3, units="in", res=1200)
+saveme
+dev.off()
+```
+
+nPTC only
+
+```{r, fig.height=2, fig.width=2}
+stats_data = norm_correlations %>% 
+  filter(non_cds) %>%
+  mutate(padj = p.adjust(p.value, method="BH")) %>%
+  filter(gene_id == "ENSG00000125351") %>% 
+  mutate(label = paste0("R=", round(estimate,2), ",padj=", formatC(padj, format="e", digits=2))) %>%
+           mutate(condition=ifelse(condition=="normal", "UPF3B - Normal", "UPF3B - Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"),
+            x=17, 
+            y=0.325)
+
+x %>%  
+  filter(non_cds=="nPTC") %>%
+  mutate(condition=ifelse(condition=="Normal", "UPF3B - Normal", "UPF3B - Cancer")) %>%
+  ggplot(aes(x=normed_tpm, y=utroniness)) + 
+  geom_point(color="#999999", alpha=0.75) + 
+  geom_smooth(method="lm", color="black") +
+  facet_wrap(vars(factor(condition, levels=c("UPF3B - Normal", "UPF3B - Cancer"))), nrow=2, scales="free") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text=element_text(size=8),
+        axis.title=element_text(size=8),
+        strip.background=element_rect(fill="white"),
+        strip.text=element_text(size=8)) + 
+  xlab("UPF3B Expression") +
+  ylab("Average 3UI PSI per sample") + 
+  geom_text(data = stats_data, mapping = aes(label=label, x=x, y=y), size=3, hjust=0.5, vjust=0.5, nudge_y = 0.005) -> saveme
+png("UPF3B_comparison_PSI_correlations_nPTC_only.png", height=2, width=2, units="in", res=1200)
+saveme
+dev.off()
+```
+### SMG8
+
+ENSG00000167447
+
+nPTC and pPTC
+
+```{r, fig.height=3, fig.width=3}
+x = normed_tpm %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  filter(gene_id=="ENSG00000167447") %>% #filter for UPF1
+  inner_join(utroniness, by=c("sample_id"="track")) %>%
+  group_by(gene_id, non_cds, condition) %>%
+  filter(sd(utroniness) > 0, sd(gene_tpm) > 0) %>% 
+  mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"))
+
+stats_data = norm_correlations %>% 
+  mutate(padj = p.adjust(p.value, method="BH")) %>%
+  filter(gene_id == "ENSG00000167447") %>% 
+  mutate(label = paste0("R=", round(estimate,2), ",\npadj=", formatC(padj, format="e", digits=2))) %>%
+           mutate(condition=ifelse(condition=="normal", "Normal", "Cancer"),
+            non_cds=ifelse(non_cds==T, "nPTC", "pPTC"),
+            x=ifelse(condition=="Normal",4.5,10), 
+            y=ifelse(non_cds=="nPTC", 0.325, 0.675))
+x$condition = factor(x$condition, levels=c("Normal", "Cancer"))
+x$non_cds = factor(x$non_cds, levels=c("pPTC", "nPTC"))
+
+x %>%  
+  ggplot(aes(x=normed_tpm, y=utroniness)) + 
+  geom_point(color="#999999", alpha=0.75) + 
+  geom_smooth(method="lm", color="black") +
+  facet_grid(vars(factor(non_cds, levels=c("pPTC", "nPTC") )), vars(factor(condition, levels=c("Normal", "Cancer"))), scales="free") + 
+  theme_bw(base_size=8) + 
+  theme(axis.text=element_text(size=8),
+        axis.title=element_text(size=8),
+        strip.background=element_rect(fill="white"),
+        strip.text=element_text(size=8)) + 
+  xlab("SMG8 Expression") +
+  ylab("Average 3UI PSO per sample") + 
+  geom_text(data = stats_data, mapping = aes(label=label, x=x, y=y), size=3, hjust=0.5, vjust=0.5, nudge_y = 0.005) -> saveme
+png("SMG8_comparison_PSI_correlations_both.png", height=3, width=3, units="in", res=1200)
+saveme
+dev.off()
+```
