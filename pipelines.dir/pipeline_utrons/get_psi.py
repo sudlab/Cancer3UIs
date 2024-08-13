@@ -78,8 +78,12 @@ def main(argv=None):
         
             for read in reads:
 
-                if read.get_tag("NH") > 1:
-                    continue
+                try:
+                    if read.get_tag("NH") > 1:
+                        continue
+                except KeyError:
+                    pass
+
             
                 if read.is_unmapped:
                     continue
