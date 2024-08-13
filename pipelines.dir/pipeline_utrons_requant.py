@@ -139,12 +139,7 @@ Code
 ====
 
 """
-from cmath import inf
 from genericpath import isdir
-from multiprocessing.sharedctypes import Value
-from ossaudiodev import control_names
-from unittest.mock import NonCallableMagicMock
-from numpy import partition
 from ruffus import *
 from ruffus.combinatorics import product
 import sys
@@ -158,8 +153,6 @@ from cgatcore import pipeline as P
 from cgatcore import iotools
 import tempfile
 
-from sklearn.tree import BaseDecisionTree
-
 # load options from the config file
 PARAMS = P.get_parameters(
     ["%s/pipeline.yml" % os.path.splitext(__file__)[0],
@@ -171,12 +164,6 @@ PARAMS = P.get_parameters(
 # 1. pipeline_annotations: any parameters will be added with the
 #    prefix "annotations_". The interface will be updated with
 #    "annotations_dir" to point to the absolute path names.
-PARAMS.update(P.peek_parameters(
-    PARAMS["annotations_dir"],
-    'genesets',
-    prefix="annotations_",
-    update_interface=True,
-    restrict_interface=True))
 
 PARAMS["project_src"]=os.path.dirname(__file__)
 
@@ -230,7 +217,6 @@ def toParquet(infile=None,
     script_path = os.path.join(os.path.dirname(__file__),
                                "pipeline_utrons",
                                "csvs2parquet.py")
-    
     
     if tablename is None:
         try:
@@ -384,7 +370,7 @@ def quantifyWithSalmon(infiles, outfile):
     job_memory=PARAMS["salmon_memory"]
 
     # limit to 8 hours - if a job get stuck. Kill it rather than waiting forever
-    job_options = PARAMS["cluster_options"] + " -l h_rt=8:00:00"
+    job_options = PARAMS["cluster_options"] 
     infile, salmonIndex = infiles
     outdir = os.path.dirname(outfile)
     basefile = os.path.basename(infile)
@@ -450,7 +436,7 @@ def quantifyWithSalmon(infiles, outfile):
             infile, token, tmpfilename,
             filter_bed=os.path.join(
                 PARAMS["annotations_dir"],
-                PARAMS["annotations_interface_contigs_bed"]))
+                "assembly.dir/contigs.bed"))
 
         infile = " ".join(infile)
         statement = "&& ".join(
@@ -508,7 +494,8 @@ def sortAndIndexBams(infile, outfile):
            regex("quantification.dir/(.+?)\.(.+)/quant.sf"),
            inputs([r"sorted_bams/\1_possorted.bam",
                    os.path.join(PARAMS["input_utron_beds"],
-                                "agg-agg-agg.all_utrons.bed.gz")]),
+                                "%s.all_utrons.bed.gz" %
+                                os.path.basename(PARAMS["input_gtf"]).split(".")[0])]),
            r"pso.dir/\1_all_utrons.pso.tsv.gz")
 def calculatePSO(infiles, outfile):
     '''Calculate the percent spliced out for the utron intervals'''
@@ -557,6 +544,7 @@ def countExonsAndJunctions(infiles, outfiles):
                                  -f
                                  -J
                                  -O
+                                 -p
                                  -G %(fastaref)s
                                  %(bamfile)s &> %(outfile)s.log &&
                                  gzip %(outfile)s
@@ -580,14 +568,15 @@ def load_exon_counts(infiles, outfile, track):
         outname = "featurecounts_exons"
         dtypes="gene_id=object,chr=object,start=uint64,end=uint64,start=object,length=uint32,count=uint32"
         col_names="gene_id,chr,start,end,strand,length,count"
-        gunzip=True
+        gunzip=False
         
     toParquet(infiles=infiles,
               outfile=outfile,
               tablenamename=outname,
               col_names=col_names,
               unzip=gunzip,
-              dtypes=dtypes)
+              dtypes=dtypes,
+              job_memory="12G")
     
     
 @active_if(PARAMS["rmats_run"])
@@ -830,7 +819,8 @@ def get_rmats_counts_per_junction(infiles, outfile):
                       "{path[0]}/test.txt",
                       "{path[0]}/normals.txt",
                        os.path.join(PARAMS["input_utron_beds"],
-                                          "agg-agg-agg.all_utrons.bed.gz")),
+                                    os.path.basename(PARAMS["input_gtf"]).split(".")[0]
+                                                     + ".all_utrons.bed.gz")),
            "rmats.dir/{subdir[0][0]}_counts_per_junction.tsv.gz")
 def run_get_rmats_counts_per_junction(infiles, outfile):
     
@@ -844,9 +834,9 @@ def load_rmats_per_junction(infiles, outfile):
     toParquet(infiles=infiles,
               regex_filename=".+/(.+)_counts_per_junction",
               outfile=outfile,
+              key_columns="design",
               tablename="rmats_junction_counts",
-              unzip=True,
-              job_memory="8G")
+              job_memory="12G")
               
               
 
@@ -990,7 +980,7 @@ def make_bigwigs(infile, outfile):
     scale = 1000000.0 / float(reads_mapped)
     tmpfile = os.path.basename(P.get_temp_filename())
     tmpfile2 = os.path.basename(P.get_temp_filename())
-    contig_sizes = PARAMS["annotations_interface_contigs"]
+    contig_sizes = os.path.join(PARAMS["annotations_dir"], "assembly.dir/contigs.tsv")
     job_memory = "8G"
     statement = '''bedtools genomecov
         -ibam %(infile)s
