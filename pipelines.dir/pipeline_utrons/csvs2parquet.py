@@ -48,6 +48,8 @@ import cgatcore.experiment as E
 from cgatcore import iotools
 import dask.dataframe as dd
 import re
+import pyarrow as pa
+import numpy as np
 
 def main(argv=None):
     """script main.
@@ -99,49 +101,63 @@ def main(argv=None):
         dtypes = {entry.split("=")[0]: entry.split("=")[1] for entry in options.dtypes.split(",")}
     else:
         dtypes = None
-        
-    for infile in args:
-        
-        E.debug("Processing " + infile)
-        if options.regex_filename:
-            keys = re.match(options.regex_filename, infile).groups()
-        elif args:
-            keys = [infile]
-        
-        if options.col_names is not None and options.header is True:
-            E.debug("Replacing header")
-            ddf = dd.read_csv(infile, sep=options.sep, 
-                              header=0, 
-                              names=options.col_names.split(","), 
-                              dtype=dtypes, assume_missing=True,
-                              comment="#")
-        elif options.col_names is not None and options.header is False:
-            E.debug("File contains no header, using provided headers")
-            ddf = dd.read_csv(infile, 
-                              sep=options.sep, 
-                              header=None, 
-                              names=options.col_names.split(","), 
-                              dtype=dtypes,
-                              assume_missing=True,
-                              comment="#")
-        else:
-            E.debug("Using first line as header")
-            ddf = dd.read_csv(infile, sep=options.sep, dtype=dtypes, assume_missing=True,
-                              comment="#")
-            
-        if options.key_columns:
-            keys = dict(zip([options.key_columns], keys))
-            ddf_with_keys = ddf.assign(**keys)
-        else:
-            ddf_with_keys = ddf
-        
-        ddf_with_keys.to_parquet(options.output_prefix,
-                                 append=True if n> 0 else False,
-                                 partition_on=options.partition_on,
-                                 write_index=False,
-                                 write_metadata_file=True,
-                                 compute=True)
-        n += 1
+    
+    if options.key_columns:
+        options.key_columns = options.key_columns.split(",")
+        track_col = options.key_columns[0]
+    elif options.regex_filename:
+        options.key_columns = ["track"]
+        track_col = "track"
+    else:
+        track_col = False
+
+    if options.regex_filename:
+        regex = re.compile(options.regex_filename)
+
+        if not regex.groups == len(options.key_columns):
+            E.error("Different number of groups in key_columns to capture"
+                    "groups in regex\n"
+                    "Key Columns = %s\n"
+                    "Regex = %s" % (",".join(options.key_columns),
+                                    options.regex_filename))
+            sys.exit(1)
+
+    if options.col_names is not None and options.header is True:
+        E.debug("Replacing header")
+        ddf = dd.read_csv(args, sep=options.sep, 
+                          header=0, 
+                          names=options.col_names.split(","), 
+                          dtype=dtypes, assume_missing=True,
+                          comment="#",
+                          include_path_column=track_col)
+    elif options.col_names is not None and options.header is False:
+        E.debug("File contains no header, using provided headers")
+        ddf = dd.read_csv(args, 
+                          sep=options.sep, 
+                          header=None, 
+                          names=options.col_names.split(","), 
+                          dtype=dtypes,
+                          assume_missing=True,
+                          comment="#",
+                          include_path_column=track_col)
+    else:
+        E.debug("Using first line as header")
+        ddf = dd.read_csv(args, sep=options.sep, dtype=dtypes, assume_missing=True,
+                          comment="#",
+                          include_path_column=track_col)
+    
+    if options.regex_filename:
+        key_cols = ddf[track_col].str.extract(options.regex_filename, expand=True)
+        key_cols.columns = options.key_columns
+        ddf = dd.concat([ddf.drop(track_col, axis=1), key_cols],
+                        axis=1)
+                        
+    ddf.to_parquet(options.output_prefix,
+                   partition_on=options.partition_on,
+                   engine="pyarrow",
+                   write_index=False,
+                   write_metadata_file=True,
+                   compute=True)
     E.stop()
     
         
