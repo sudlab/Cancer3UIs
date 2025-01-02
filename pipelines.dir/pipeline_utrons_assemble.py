@@ -102,10 +102,6 @@ Input files
 Requirements
 ------------
 
-The pipeline requires the results from
-:doc:`pipeline_annotations`. Set the configuration variable
-:py:data:`annotations_database` and :py:data:`annotations_dir`.
-
 On top of the default CGAT setup, the pipeline requires the following
 software to be in the path:
 
@@ -158,14 +154,12 @@ from ruffus.combinatorics import product
 import sys
 import os
 import shutil
-#from gffutils import DataIterator as DataIterator
 import sqlite3
 import subprocess
 import glob
 from cgatcore import experiment as E
 import cgat.Sra as Sra
 from cgatcore import pipeline as P
-import cgatpipelines.tasks.rnaseq as RnaSeq
 import tempfile
 # from cgatpipelines.report import run_report
 
@@ -175,52 +169,7 @@ PARAMS = P.get_parameters(
      "../pipeline.yml",
      "pipeline.yml"])
 
-# add configuration values from associated pipelines
-#
-# 1. pipeline_annotations: any parameters will be added with the
-#    prefix "annotations_". The interface will be updated with
-#    "annotations_dir" to point to the absolute path names.
-PARAMS.update(P.peek_parameters(
-    PARAMS["annotations_dir"],
-    'genesets',
-    prefix="annotations_",
-    update_interface=True,
-    restrict_interface=True))
-
 PARAMS["project_src"]=os.path.dirname(__file__)
-
-# if necessary, update the PARAMS dictionary in any modules file.
-# e.g.:
-#
-# import CGATPipelines.PipelineGeneset as PipelineGeneset
-# PipelineGeneset.PARAMS = PARAMS
-#
-# Note that this is a hack and deprecated, better pass all
-# parameters that are needed by a function explicitely.
-RnaSeq.PARAMS = PARAMS
-
-# -----------------------------------------------
-# Utility functions
-def connect():
-    '''utility function to connect to database.
-
-    Use this method to connect to the pipeline database.
-    Additional databases can be attached here as well.
-    Returns an sqlite3 database handle.
-    '''
-
-    dbh = sqlite3.connect(PARAMS["database_name"])
-    statement = '''ATTACH DATABASE '%s' as annotations''' % (
-        PARAMS["annotations_database"])
-    cc = dbh.cursor()
-    cc.execute(statement)
-    cc.close()
-
-    return dbh
-
-STRINGTIE_QUANT_FILES=["i_data.ctab", "e_data.ctab", "t_data.ctab",
-                       "i2t.ctab", "e2t.ctab"]
-
 
 # ---------------------------------------------------
 @follows(mkdir("assembled_transcripts.dir"), mkdir("portcullis"))
@@ -229,7 +178,7 @@ STRINGTIE_QUANT_FILES=["i_data.ctab", "e_data.ctab", "t_data.ctab",
            formatter(),
            add_inputs(os.path.join(
                PARAMS["annotations_dir"],
-               PARAMS["annotations_interface_geneset_all_gtf"])),
+               PARAMS["annotations_geneset"])),
            "assembled_transcripts.dir/{basename[0]}.gtf.gz")
 def assembleWithStringTie(infiles, outfile):
 
@@ -273,7 +222,7 @@ def assembleWithStringTie(infiles, outfile):
             infile, token, tmpfilename,
             filter_bed=os.path.join(
                 PARAMS["annotations_dir"],
-                PARAMS["annotations_interface_contigs_bed"]))
+                PARAMS["annotations__contigs_bed"]))
 
         infile = " ".join(infile)
         statement = "; ".join(
@@ -284,15 +233,40 @@ def assembleWithStringTie(infiles, outfile):
 
     P.run(statement) 
 
-@follows(mkdir("merged_reps.dir"))
-@collate("assembled_transcripts.dir/*.star.gtf.gz",
-       regex("assembled_transcripts.dir/(.+)-.+.star.gtf.gz"),
-       r"merged_reps/\1-merged.gtf.gz")
+@follows(mkdir("final_genesets.dir"))
+@collate(assembleWithStringTie,
+       regex("assembled_transcripts.dir/(.+)-(.+)-.+gtf.gz"),
+       r"final_genesets.dir//\1-\2-agg.gtf.gz")
 def merge_reps(infiles, outfile):
     
     infiles = ["<(zcat %s)" % infile for infile in infiles]
     infiles = " ".join(infiles)
-    reference = os.path.join(PARAMS["annotations_dir"], PARAMS["annotations_interface_geneset_all_gtf"])
+    reference = os.path.join(PARAMS["annotations_dir"], PARAMS["annotations_geneset"])
+
+    job_threads = PARAMS["stringtie_merge_threads"]
+    job_memory = PARAMS["stringtie_merge_memory"]
+
+    statement = '''stringtie --merge
+                             -G <(zcat %(reference)s)
+                             -p %(stringtie_merge_threads)s
+                             %(stringtie_merge_options)s
+                             %(infiles)s
+                            2> %(outfile)s.log
+                   | cgat gtf2gtf --method=sort
+                           --sort-order=gene+transcript
+                            -S %(outfile)s -L %(outfile)s.log'''
+
+    P.run(statement) 
+
+@follows(mkdir("final_genesets.dir"))
+@collate(assembleWithStringTie,
+       regex("assembled_transcripts.dir/(.+)-.+-.+.gtf.gz"),
+       r"final_genesets.dir/\1-agg-agg.gtf.gz")
+def merge_tissues(infiles, outfile):
+    
+    infiles = ["<(zcat %s)" % infile for infile in infiles]
+    infiles = " ".join(infiles)
+    reference = os.path.join(PARAMS["annotations_dir"], PARAMS["annotations_geneset"])
 
     job_threads = PARAMS["stringtie_merge_threads"]
     job_memory = PARAMS["stringtie_merge_memory"]
@@ -310,7 +284,8 @@ def merge_reps(infiles, outfile):
     P.run(statement) 
 
 
-@follows(assembleWithStringTie)
+
+@follows(assembleWithStringTie, merge_reps, merge_tissues)
 def full():
     pass
 
