@@ -309,7 +309,7 @@ dtu_results_table <-
          has_e3UI = transcript_id %in% 
            non_cds$V1) 
 
-
+write.table(dtu_results_table, "Supplementary_data_10.tsv", sep="\t", row.names=F, quote=F)
 ```
 
 ```{r, fig.width=3, fig.height=2}

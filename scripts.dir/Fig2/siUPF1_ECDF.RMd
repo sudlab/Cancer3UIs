@@ -205,7 +205,36 @@ plot_data %>% filter(category!="NA") %>%
         legend.key.width = unit(3,"mm")) + ylab("") + xlab("log2FoldChange(siUPF1)")+ 
   annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=0.95, hjust=0) + 
   annotate("text", label=paste0("p=",round(test$p.value, 12)), x=-5, y=0.8, hjust=0) -> saveme
-png("ptc_vs_nonPTC.png", height=2, width=2, units="in", res=1200)
+png("e3UI_vs_NMD_vs_coding.png", height=2, width=2, units="in", res=1200)
 saveme
 dev.off()
+```
+
+
+Plot co3UI vs e3UI for reviewer 2
+```{r, fig.width=2, fig.height=2}
+
+test_nonPTC = plot_data %>% filter(non_cds) %>% dplyr::select(log2FoldChange) %>% unlist()
+test_pPTC = plot_data %>% filter(utron & !non_cds) %>% dplyr::select(log2FoldChange) %>% unlist()
+test = ks.test(test_nonPTC, test_pPTC)
+
+plot_data %>% filter(utron) %>% filter(category!="NA") %>%
+  mutate(category = ifelse(non_cds, "e3UI", "co3UI")) %>%
+  ggplot() +
+  aes(x=log2FoldChange, col=category) + 
+  stat_ecdf() + 
+  coord_cartesian(xlim=c(-5,5)) + 
+  scale_color_manual(values=cbbPalette)+ 
+  theme_bw(base_size = 8) + 
+  theme(legend.position = "top", 
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(size=8),
+        legend.key.width = unit(3,"mm")) + ylab("") + xlab("log2FoldChange(siUPF1)")+ 
+  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-5, y=0.95, hjust=0) + 
+  annotate("text", label=paste0("p=",round(test$p.value, 20)), x=-5, y=0.8, hjust=0) -> saveme
+png("e3UI_vs_co3UI.png", height=2, width=2, units="in", res=1200)
+saveme
+dev.off()
+
 ```

@@ -1,0 +1,143 @@
+---
+title: "Composition comparison of co3UIs and e3UIs"
+output: html_notebook
+---
+
+This notebook compares the sequences of co3UIs and e3UIs on the suggestion of
+reviewer one. 
+
+First we compute merged intron sets for e3UIs and co3UIs. co3UIs are basically
+all 3UIs minus e3UIs. We merge  as 3UIs can be overlapping, and we don't want
+to double count (for nucletide composition).
+
+```{bash}
+source ~/mambaforge/bin/activate /shared/sudlab1/utrons/new_utrons_env
+
+bedtools sort -i "../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.indevidual_utrons.bed.gz" \
+    |  bedtools merge -i - \
+    |  bedtools intersect -v -a - -b <(bedtools sort \
+                                        -i  ../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.bed.gz) \
+    |  bedtools nuc -bed - \
+             -fi /shared/sudlab1/General/mirror/genomes/index/hg38_noalt.fa \
+              > TCGA_co3UI_composition.tsv   
+
+bedtools sort -i "../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.bed.gz" \
+    | bedtools merge -i - \
+    |  bedtools nuc -bed - \
+             -fi /shared/sudlab1/General/mirror/genomes/index/hg38_noalt.fa \
+              > TCGA_e3UI_composition.tsv  
+```
+
+Now we load these tables up and concatenate them.
+```{r}
+library(tidyverse)
+composition_co3UI <- read.delim("TCGA_co3UI_composition.tsv")
+composition_e3UI <- read.delim("TCGA_e3UI_composition.tsv")
+composition <- bind_rows(list(e3UI = composition_e3UI, co3UI = composition_co3UI),
+                         .id = "category")
+names(composition) <- c("category",
+                        "contig",
+                             "start",
+                             "end",
+                             "pct_at",
+                             "pct_gc",
+                             "numA",
+                             "numC",
+                             "numG",
+                             "numT",
+                             "numN",
+                             "numOth",
+                             "len")
+non_cds <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.ids.gz",
+                      header=F, col.names=c("transcript_id", "match_transcript_id"))
+
+```
+
+
+Make the plot and save it. 
+
+```{r, fig.width=2, fig.height=2}
+ggplot(composition) +
+  aes(pct_gc, fill=category) +
+  stat_density(fill="#888888", col="black") + 
+  facet_grid(category~.) +
+  theme_bw(base_size=8) +
+  scale_fill_discrete(name=NULL) +
+  theme(legend.position="top") +
+  xlab("%GC") +
+  scale_x_continuous(labels=scales::percent)-> saveme
+
+ggsave("co3UI_vs_e3UI_GC.png", saveme, width=2, height=2, units="in", dpi=1200)
+
+```
+
+For length, we actaully do want to count each intron seperately, rather than 
+just those the total de-duplicated bases, we might as well calculate the lengths
+directly from the bed files. 
+
+```{r, fig.width=2, fig.height=2}
+bednames <- c("contig", "start", "end", "transcript_id", "score", "strand", "stop_codon")
+utrons <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.indevidual_utrons.bed.gz",
+                     header=F, col.names=bednames) %>%
+  distinct(contig, start, end) %>%
+  mutate(length = end-start)
+
+e3UIs <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.bed.gz",
+                    header=F, col.names=bednames)
+
+utrons %>%
+  mutate(category=ifelse(paste(contig, start, end) %in% paste(e3UIs$contig, e3UIs$start, e3UIs$end),
+                         "e3UI", "co3UI"),
+         ) %>%
+ggplot() +
+  aes(length) +
+  stat_density(fill="#888888", col="black") + 
+  facet_grid(category~.) +
+  theme_bw(base_size=8) +
+  scale_fill_discrete(name=NULL) +
+  scale_x_log10() + 
+  theme(legend.position="top") +
+  xlab("3UI Length (bp)") -> saveme
+
+ggsave("co3UI_vs_e3UI_length.png", saveme, width=2, height=2, units="in", dpi=1200)
+```
+
+Finally conservation. Here we need to return certain parts of the bigwig with phyloP conservation scores. phyloP-homo_sapiens-hg38.bw can be obtained from UCSC.
+
+```{r, fig.width=2, fig.height=2}
+library(rtracklayer)
+library(GenomicRanges)
+e3UIs_bed <- with(e3UIs, GRanges(contig, IRanges(start, end)))
+e3UIs_bed <- reduce(e3UIs_bed)
+#  import.bed("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.bed.gz")
+e3UIs_conservation <- import("../../../../analysis/conservation/phyloP-homo_sapiens-hg38.bw",
+                                 as="NumericList",
+                                 selection=BigWigSelection(ranges=e3UIs_bed))
+e3UI_mean_cons <- data.frame(category="e3UI", phyloP=lapply(e3UIs_conservation, mean) %>% unlist())
+
+co3UIs_bed <- with(utrons, GRanges(contig, IRanges(start, end)))
+co3UIs_bed <- reduce(co3UIs_bed)
+co3UIs_bed <- co3UIs_bed[co3UIs_bed %outside% e3UIs_bed]
+co3UIs_conservation <- import("../../../../analysis/conservation/phyloP-homo_sapiens-hg38.bw",
+                                 as="NumericList",
+                                 selection=BigWigSelection(ranges=co3UIs_bed))
+co3UI_mean_cons <- data.frame(category="co3UI", phyloP=lapply(co3UIs_conservation, mean) %>%unlist())
+plot_stats <- bind_rows(list(co3UI_mean_cons, e3UI_mean_cons)) %>%
+  group_by(category) %>%
+  summarize(mean_phyloP = mean(phyloP), median_phyloP=median(phyloP))
+bind_rows(list(co3UI_mean_cons, e3UI_mean_cons)) %>% 
+  ggplot() + 
+  aes(phyloP) +
+  stat_density(fill="#888888") +
+  facet_grid(category~.) +
+  theme_bw(base_size=8) +
+  scale_fill_discrete(name=NULL) +
+  theme(legend.position="top") +
+  coord_cartesian(xlim=c(-1, 3)) +
+ # geom_vline(data=plot_stats, mapping=aes(xintercept=mean_phyloP)) +
+  geom_vline(data=plot_stats, mapping=aes(xintercept=median_phyloP), lty=2) +
+  xlab("Mean phyloP score") -> saveme
+ggsave("co3UI_vs_e3UI_conservation.png", saveme, width=2, height=2, unit="in", dpi=1200)
+ks.test(co3UI_mean_cons$phyloP, e3UI_mean_cons$phyloP)
+```
+

@@ -1,0 +1,81 @@
+---
+title: "Supplementary Figure 6B - UPF1 knockdown effect on HRAS reporters"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Background
+
+HCT116 cells were seeded Thurs 20th Oct 2022 into 24 well plates at 35,000 cells / well
+
+RNAi done on Saturday 22 Oct, They were ~30% confluent. pDNA transfection done 23 Oct (70% confluent). 2nd hit RNAi done 24 Oct. 
+
+
+Luciferase was measured using luminometer in SW lab. Followed standard protocol but used reduced amount of reagents:
+ - passive lysis in 100ul PLB
+ - 25ul LAR II (instead of 100ul)
+ - 5ul of lysate (instead of 20ul)
+ - 25ul Stop & Glo (instead of 100ul)
+ 
+## Code
+
+```{r load, message=F, warning=F}
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(tidyr)
+library(ggpubr)
+
+data = fread("raw_data_UPF1_Luc.csv")
+```
+
+
+
+```{r}
+Luc_data = data %>% filter(Luc_type=="Firefly") %>% select(-Luc_type)
+Ren_data = data %>% filter(Luc_type=="Renilla") %>% select(-Luc_type)
+names(Luc_data)[4]="Luc_value"
+names(Ren_data)[4]="Ren_value"
+
+joined_data = left_join(Luc_data, Ren_data) %>% 
+  mutate(Ratio=Luc_value/Ren_value) %>%
+  group_by(RNAi,Isoform, Biorep) %>% 
+  summarize(mean_Ratio = mean(Ratio))
+
+merged = joined_data %>% group_by(RNAi, Isoform) %>% 
+  summarize(sd=sd(mean_Ratio), num=n(), sem=sd/sqrt(num), mean=mean(mean_Ratio))
+```
+
+```{r}
+
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+```
+
+
+
+
+```{r, fig.height=2.5, fig.width=6}
+my_comparisons = list(c("siDsRed", "siUPF1"))
+joined_log = joined_data %>% mutate(log_mean = log2(mean_Ratio))
+joined_log %>%
+  mutate(Isoform = factor(Isoform, levels=c("flUTR", "GT>GA", "deltaIntron")),
+         RNAi = sub("siUPF1_2", "siUPF1", RNAi)) %>%
+ggbarplot( x="RNAi", 
+          y="log_mean", 
+          add="mean_se", 
+          order=c("siDsRed", "siUPF1"),
+          facet.by = "Isoform",
+          fill="Isoform",
+                    palette = cbPalette) +
+  labs(x="RNAi", y="Log2 (Firefly/Renilla)") + 
+  theme_bw(base_size=8) + 
+  theme(legend.position = "none", axis.text.x=element_text(angle=45, hjust=1)) + scale_fill_manual(values=cbPalette) + 
+  stat_compare_means(comparisons=my_comparisons, method="t.test") +
+  coord_cartesian(ylim=c(0,4.5)) -> saveme
+ png("UPF1_HRAS_Luc.png", width=5, height=2, units="in", res=1200)
+ saveme
+ dev.off()
+```

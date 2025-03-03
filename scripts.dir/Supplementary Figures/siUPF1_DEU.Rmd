@@ -1,0 +1,117 @@
+---
+title: "Effect of stop codon distance on splicing change after siUPF1 via DTE"
+output: html_notebook
+---
+
+THe reviewer asked us to test if the result where introns more than 55nt frmo the
+stop codon were no more likely to trigger NMD, than those closer using DTE, rather
+than DTU. 
+
+My personal hypothesis is that this will be less sensitive, because a transcript
+can carry mulitple introns, and one closer than 55nt might change because it is
+in a transcript with one further than 55nt. But we can always test. 
+
+We will use the RMATS results, which were calculated on the TCGA transcript build.
+
+```{r}
+library(tidyverse)
+dte <- read.delim("../../../../../HCT-NMD_KD/requant/rmats.dir/HCT116/RI.MATS.JC.txt") %>%
+  select(-ID, -ID.1) %>%
+  distinct(chr, upstreamEE, downstreamES, PValue, FDR, IncLevel1, IncLevel2, IncLevelDifference)
+tx2gene <- read.delim("../../../../final_classifications/filtered_genesets.dir/TCGA-agg-agg.filtered.tx2gene.tsv")
+non_cds <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.ids.gz", header=F)
+introns <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.bed.gz",
+                      col.names = c("chr", "start", "end", "name", "score", "strand", "stop")) %>%
+  separate(name, sep=":", into=c("transcript_id", "match_transcript_id")) %>%
+  left_join(tx2gene)
+stop_codons = read.delim("../../../all_TCGA/expression.dir/gtf_stop_codons.txt", col.names=c("gene_id", "transcript_id", "symbol", "strand", "stop_codon", "chromosome", "start", "end"))
+
+splice_sites = read.delim("../../../all_TCGA/expression.dir/all_splice_sites.txt")
+
+#mutate to give bool for greater than 55
+splice_site_distances = splice_site_distances %>% mutate(`>55nt`=stop_distance>55)
+
+```
+
+
+We can now use the bed info to calculate the distance to the stop codon and add that.
+
+```{r}
+dte %>%
+  inner_join(introns, by=c("chr"="chr", "upstreamEE"="start", "downstreamES"="end")) %>% 
+  mutate(stop_distance = ifelse(strand=="+",
+                                upstreamEE - stop,
+                                stop - downstreamES),
+         `>55nt`=stop_distance>55) %>%
+  na.omit() %>%
+  distinct(chr, upstreamEE, downstreamES,  IncLevelDifference, `>55nt`, .keep_all = T) -> plot_data
+```
+```{r, fig.height=2, fig.width=2}
+over55 = plot_data %>% filter(`>55nt`) %>% dplyr::select(IncLevelDifference) %>% unlist()
+under55 = plot_data %>% filter(`>55nt`==F) %>% dplyr::select(IncLevelDifference) %>% unlist()
+test = ks.test(over55, under55)
+plot_data %>%
+  mutate(`>55nt` = ifelse(`>55nt`, ">55nt", "<55nt")) %>%
+  ggplot() +
+  aes(x=IncLevelDifference, col=`>55nt`) +
+  stat_ecdf() +
+  coord_cartesian(xlim=c(-0.5,0.5)) +
+  scale_color_manual(values=cbbPalette) + 
+  theme_bw(base_size = 8) + 
+  theme(legend.position = "top", 
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(size=8)) + ylab("") + xlab("IncLevelDifference(siUPF1)")+ 
+  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-0.5, y=0.95, hjust=0) + 
+  annotate("text", label=paste0("p=",round(test$p.value,4)), x=-0.5, y=0.8, hjust=0) -> saveme
+
+png("over_vs_under_55_DEU.png", width=2, height=2, units="in", res=1200)
+saveme
+dev.off()
+```
+
+Some transcripts have multiple 3UIs, and its possible that some will be more than
+55nt from the stop and others more. This will "contaminate" the effect on <55nt 
+3UIs with the effect from 3UIs >55nt. How about we filter out transcripts where some
+3UIs are greater than 55nt, and some less?
+
+```{r}
+dte %>%
+  inner_join(introns, by=c("chr"="chr", "upstreamEE"="start", "downstreamES"="end")) %>% 
+  mutate(stop_distance = ifelse(strand=="+",
+                                upstreamEE - stop,
+                                stop - downstreamES),
+         `>55nt`=stop_distance>55) %>%
+  group_by(transcript_id) %>%
+  filter(n_distinct(`>55nt`) ==1) %>%
+  ungroup() %>%
+  na.omit() %>%
+  distinct(chr, upstreamEE, downstreamES,  IncLevelDifference, .keep_all = T) -> plot_data
+
+```
+
+```{r, fig.height=2, fig.width=2}
+over55 = plot_data %>% filter(`>55nt`) %>% dplyr::select(IncLevelDifference) %>% unlist()
+under55 = plot_data %>% filter(`>55nt`==F) %>% dplyr::select(IncLevelDifference) %>% unlist()
+test = ks.test(over55, under55)
+plot_data %>%
+  mutate(`>55nt` = ifelse(`>55nt`, ">55nt", "<55nt")) %>%
+  ggplot() +
+  aes(x=IncLevelDifference, col=`>55nt`) +
+  stat_ecdf() +
+  coord_cartesian(xlim=c(-0.5,0.5)) +
+  scale_color_manual(values=cbbPalette) + 
+  theme_bw(base_size = 8) + 
+  theme(legend.position = "top", 
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(size=8)) + ylab("") + xlab("IncLevelDifference(siUPF1)")+ 
+  annotate("text", label=paste0("D=",round(test$statistic,3)), x=-0.5, y=0.95, hjust=0) + 
+  annotate("text", label=paste0("p=",round(test$p.value,4)), x=-0.5, y=0.8, hjust=0) 
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

@@ -1,0 +1,25 @@
+---
+title: "Effect of stop codon distance on splicing change after siUPF1 via DTE"
+output: html_notebook
+---
+
+THe reviewer asked us to test if the result where introns more than 55nt frmo the
+stop codon were no more likely to trigger NMD, than those closer using DTE, rather
+than DTU. 
+
+My personal hypothesis is that this will be less sensitive, because a transcript
+can carry mulitple introns, and one closer than 55nt might change because it is
+in a transcript with one further than 55nt. But we can always test. 
+
+We will use the RMATS results, which were calculated on the TCGA transcript build.
+
+```{r}
+library(tidyverse)
+dte <- read.delim()
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

@@ -27,7 +27,11 @@ library(data.table)
 Load in the configs / run-specific information
 
 ```{r load_configs}
+#load config and info file
+#pipeline_yml = yaml::read_yaml("../../pipeline.yml")
 
+#determine which comparison we are currently doing
+#folder_name = basename(getwd())
 
 #get formula
 formula = "~var1"
@@ -46,11 +50,44 @@ Generate sample table for tximport
 
 quant_dir = "../../../../../HCT-NMD_KD/requant/quantification.dir/"
 
+#file_namings = fread("../../file_naming.tsv", header=F)
+
 all_files = list.files(quant_dir, pattern="*")
 all_files = file.path(quant_dir,  all_files, "quant.sf")
 
 sample_names <- gsub(".star.agg-agg-agg.filtered", "", basename(dirname(all_files)))
 names(all_files) <- sample_names
+
+#comparison = as.character(str_split(basename(getwd()), "_vs_")[[1]])
+#file_namings = file_namings %>% filter(V1 %in% comparison)
+#condition1_files = list.files("../../quantification.dir", pattern=as.character(file_namings[1,2]), recursive=T)
+#condition2_files = list.files("../../quantification.dir", pattern=as.character(file_namings[2,2]), recursive=T)
+
+#condition1_files = condition1_files[grepl("/", condition1_files)]
+#condition2_files = condition2_files[grepl("/", condition2_files)]
+
+#condition1_filenames = sapply(condition1_files, function(x) str_split(substr(x, 0, nchar(x)-3),"/")[[1]][1])
+#condition2_filenames = sapply(condition2_files, function(x) str_split(substr(x, 0, nchar(x)-3),"/")[[1]][1])
+
+#condition1_files = paste0(quant_dir, "/", condition1_files)
+#condition2_files = paste0(quant_dir, "/", condition2_files)
+
+#create basic sample table for condition 1 with var1 set to comparison[1].
+#sample_table_1 = data.frame(files=condition1_files, sample_id=condition1_filenames) %>% 
+#  mutate(files = as.character(condition1_files)) %>% mutate(var1 = comparison[1]) %>%
+#  transmute(sample_id = sample_id,
+#            var1 = var1,
+#            files = files)
+
+#create basic sample table for condition 2 with var1 set to comparison[2].
+#sample_table_2 = data.frame(files=condition2_files, sample_id=condition2_filenames) %>% 
+#  mutate(files = as.character(condition2_files)) %>% mutate(var1 = comparison[2]) %>%
+#  transmute(sample_id = sample_id,
+#            var1 = var1,
+#            files = files) 
+
+#merge the 2 sample tables
+#sample_table = rbind(sample_table_1, sample_table_2)
 
 sample_table = data.frame(files=all_files, sample_id=sample_names)
 sample_table = sample_table %>% mutate(var1=ifelse(stringr::str_detect(sample_id, "HCT116-R"), "siDSRed", "siUPF1"))
@@ -238,13 +275,14 @@ plotProportions(d, res$gene_id[idx], "var1")
 
 ```{r stageR_drim}
 pScreen = res$pvalue
-
-names(pScreen) = res$gene_id
+#strp = function(x) substr(x,1,15)
+names(pScreen) = strp(res$gene_id)
 
 pConfirmation = matrix(res.txp$pvalue, ncol=1)
 rownames(pConfirmation) = res.txp$feature_id
 
 tx2gene = res.txp[,c("feature_id", "gene_id")]
+#for (i in 1:2) tx2gene[,i] = strp(tx2gene[,i])
 
 stageRObj = stageRTx(pScreen = pScreen,
                      pConfirmation = pConfirmation,
@@ -259,76 +297,3 @@ suppressWarnings({
 
 head(drim.padj)
 ```
-
-
-Now get the fract_expr data
-```{r}
-txdf = read.delim("../../../../final_classifications/filtered_genesets.dir/TCGA-agg-agg.filtered.tx2gene.tsv") %>%
-  select(transcript_id=transcript_id, gene_id=match_gene_id)
-# txi_gene <- tximport::summarizeToGene(txi, txdf) 
-# 
-# gene_tpm <- txi_gene$abundance
-# colnames(gene_tpm) <- sample_table$sample_id
-# 
-# as.data.frame(gene_tpm) %>% 
-#   rownames_to_column("gene_id") %>%
-#   pivot_longer(-gene_id, names_to="sample_id", values_to="gene_tpm") %>%
-#   filter(gene_tpm>0) -> gene_tpm
-
-tx_tpm <- txi$abundance
-colnames(tx_tpm) <- sample_table$sample_id
-
-as.data.frame(tx_tpm) %>% 
-  rownames_to_column("transcript_id") %>%
-  pivot_longer(-transcript_id, names_to="sample_id", values_to="transcript_tpm") %>%
-  left_join(sample_table) %>%
-  group_by(transcript_id, var1) %>%
-  summarize(transcript_tpm = median(transcript_tpm, na.rm=T)) %>%
-    left_join(txdf) %>%
-  group_by(gene_id, var1)  %>%
-  mutate(gene_tpm=sum(transcript_tpm),
-         fract_expr = (transcript_tpm+0.1)/(gene_tpm+0.1)) %>%
-  pivot_wider(id_cols=transcript_id,
-              names_from=var1,
-              names_sep="_",
-              values_from=c("fract_expr", "transcript_tpm"),
-              ) -> fract_expr
-
-all_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.all_utrons.ids.gz", header=F)
-novel_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.novel_utrons.ids.gz", header=F)
-partnered_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.partnered_utrons.ids.gz", header=F)
-non_cds <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.ids.gz", header=F)
-
-
-dtu_results_table <-
-  drim.padj %>% 
-  select(gene_id=geneID, transcript_id =txID, gene_padj=gene, transcript_padj=transcript) %>% 
-  left_join(fract_expr) %>%
-  mutate(has_3UI = transcript_id %in% all_utrons$V1,
-         has_novel_3UI = transcript_id %in% novel_utrons$V1,
-         has_e3UI = transcript_id %in% 
-           non_cds$V1) 
-
-
-```
-
-```{r, fig.width=3, fig.height=2}
-dtu_results_table %>%
-  filter(transcript_tpm_siDSRed >2.5 | transcript_tpm_siUPF1 >2.5) %>%
-  filter(has_3UI==T,
-         !is.na(transcript_padj)) %>%
- ggplot() + aes(x=fract_expr_siDSRed, y=fract_expr_siUPF1, color=transcript_padj < 0.05, alpha=transcript_padj < 0.05) +
-  geom_point(size=0.5) +
-  theme_bw(base_size=8) +  xlab("Tx/Gene in Control") +
-  ylab("Tx/Gene in siUPF1") +
-  coord_fixed() +
-  theme(axis.text = element_text(size=8),
-        aspect.ratio=0.75,
-        legend.position = "none") + 
-  scale_color_manual(values=c("black", "red")) + 
-  scale_alpha_manual(values=c(0.5,1))  -> saveme
-png("siUPF1_DTUtrons.png", height=2, width=3, units="in", res=1200)
-saveme
-dev.off()
-```
-

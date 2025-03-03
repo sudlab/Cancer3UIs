@@ -174,6 +174,7 @@ norm_correlations %>%
 
 ```
 
+
 This is much closer to the expected distributin of correlation coefficients. What does this look like for the 
 NMD factors?
 
@@ -484,3 +485,86 @@ png("SMG8_comparison_PSI_correlations_both.png", height=3, width=3, units="in", 
 saveme
 dev.off()
 ```
+
+
+
+```{r}
+RBPs_boardly = c("PRPF8", "TARBP2", "SF3B4", "FTO", "DHX9", "XRN2", "ILF3", "KHSRP", "HNRNPUL1", "DDX42")
+
+RBP_up_in_cancer = c("TARBP2", "SF3B4", "FTO", "DHX9", "RBM22")
+
+norm_correlations %>%
+  ungroup() %>%
+  mutate(FDR=p.adjust(p.value, method="BH"),
+         non_cds=ifelse(non_cds, "nPTC", "pPTC"),
+         condition=ifelse(condition=="test", "Cancer", "Normal"),
+         category=paste(condition, non_cds)) %>%
+  filter(SYMBOL =="TARBP2") 
+  dplyr::select(SYMBOL, category, estimate) %>%
+  pivot_wider(values_from=estimate, id_cols=SYMBOL, names_from=category) %>%
+  as.data.frame() -> RBP_matrix
+
+rownames(RBP_matrix) <- RBP_matrix$SYMBOL
+RBP_matrix <- as.matrix(RBP_matrix[,-1])
+
+library(ComplexHeatmap)
+Heatmap(RBP_matrix,
+        col=circlize::colorRamp2(c(-0.5,0,0.5), c("Blue", "White", "Red")),
+        row_names_gp = grid::gpar(fontsize=8),
+        column_names_gp = grid::gpar(fontsize=8),
+        column_names_rot=45,
+        name=" ",
+) 
+```
+  
+```{r}
+norm_correlations %>%
+  filter(non_cds) %>% 
+  distinct(gene_id, condition, estimate, p.value) %>%
+  group_by(condition) %>%
+  mutate(padj = p.adjust(p.value, method="BH") )%>%
+  pivot_wider(id_cols=gene_id, names_from=condition, values_from = padj) %>%
+  mutate(diff=test-normal) %>%
+  left_join(tx2gene, by=c("gene_id"="ENSEMBL")) %>%
+  ungroup() %>%
+  mutate(m = mean(diff, na.rm=T),
+         s = sd(diff, na.rm=T),
+         z = (diff-m)/s) %>%
+  arrange(diff) -> cor_diffs
+
+
+print(subset(cor_diffs, SYMBOL %in% c("TARBP2", "HNRNPU", "HNRNPUL1", "FTO")))
+
+
+ggplot(norm_correlations) +
+  aes(x=p.value) +
+  geom_histogram() +
+  facet_grid(condition~non_cds)
+```
+  
+  
+# Comparisons using cocor
+
+```{r}
+library(cocor)
+normed_tpm %>%
+  inner_join(filter(tx2gene, grepl("^UPF|^SMG", SYMBOL)), by=c("gene_id"="ENSEMBL")) %>%
+  mutate(sample_id=gsub(".", "-", sample_id, fixed=T)) %>%
+  inner_join(utroniness, by=c("sample_id"="track"), relationship="many-to-many") %>%
+   filter(non_cds) %>%
+  group_by(gene_id, condition) %>%
+  filter(sd(utroniness) > 0, sd(gene_tpm) > 0) %>%
+  mutate(mean_PSO = utroniness) %>%
+    group_by(SYMBOL) %>% 
+  do(with(., cocor(formula = ~ mean_PSO + normed_tpm | mean_PSO + normed_tpm,
+                data=list(as.data.frame(subset(., condition=="test")),
+                          as.data.frame(subset(., condition=="normal"))),
+                test="fisher1925",
+                return.htest=TRUE )[[1]] 
+       %>% broom::tidy()))
+  
+
+```
+  
+
+

@@ -1,0 +1,121 @@
+---
+title: "siUPF1 DTE ECDF plots"
+output:
+  html_document:
+    df_print: paged
+---
+
+The purpose of this script is to look at how population classes of 3'UTR spliced transcripts react to UPF1 knockdown
+
+```{r}
+library(DESeq2)
+library(tximport)
+library(dplyr)
+library(tibble)
+library(stringr)
+```
+
+Load sample names
+
+```{r}
+tx2gene<-read.delim(file='../../../merged_gtfs/all_tissues_merged/final_geneset.dir/all_tissues_agg-agg-agg.filtered.tx2gene.tsv', 
+                    header = TRUE, sep = '\t', dec = '.') %>%
+  dplyr::select(transcript_id, gene_id=match_gene_id)
+
+quant_dir = "../../../../../HCT-NMD_KD/requant/quantification.dir"
+all_files = list.files(quant_dir, pattern="*")
+all_files = file.path(quant_dir,  all_files, "quant.sf")
+
+sample_names <- sapply(all_files, function(x) substr(x, 0, nchar(x)-3))
+sample_names <- sapply(sample_names, function(x) substr(x, 32, nchar(x)))
+names(all_files) <- sample_names
+```
+
+Generate sample table, comparing siUPF1 to control
+
+```{r}
+sample_table = data.frame(files=all_files, names=sample_names)
+sample_table = sample_table %>% mutate(condition=ifelse(stringr::str_detect(names, "HCT116-R"), "siControl", "siUPF1"))
+sample_table$files = as.character(sample_table$files)
+```
+
+Tximport transcript level
+
+```{r}
+txi <- tximport(sample_table$files, type="salmon", tx2gene=tx2gene, txOut=T)
+```
+
+Generate deseq dataset to compare the conditions
+
+```{r}
+dds <- DESeqDataSetFromTximport(txi, sample_table, ~condition)
+```
+
+Run deseq
+
+```{r}
+dds_result = DESeq(dds, parallel = T)
+```
+
+Filter for rows where there is at least 1 count in all samples for at least 1 condition
+
+```{r}
+nrow(dds_result)
+keep = rowSums(counts(dds_result)[,1:8]>1)>=4|rowSums(counts(dds_result)[,9:16]>1)>=4
+sum(keep)
+dds_result = dds_result[keep,]
+nrow(dds_result)
+```
+
+Deseq2 result
+
+```{r}
+dds_result = results(dds_result)
+```
+
+MA plot
+
+```{r}
+plotMA(dds_result)
+```
+Add annotation for 3UIs
+```{r}
+all_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.all_utrons.ids.gz", header=F)
+novel_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.novel_utrons.ids.gz", header=F)
+partnered_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.partnered_utrons.ids.gz", header=F)
+non_cds <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.no_cds_utrons.ids.gz", header=F)
+
+utron_annotation <- data.frame(  transcript_id = rownames(dds_result)) %>%
+  mutate(has_3UI = transcript_id %in% all_utrons$V1,
+         has_novel_3UI = transcript_id %in% novel_utrons$V1,
+         has_e3UI = transcript_id %in% non_cds$V1)
+
+suplementary_data <- dds_result %>%
+  as.data.frame() %>%
+  rownames_to_column("transcript_id") %>%
+  left_join(tx2gene) %>%
+  left_join(utron_annotation) %>%
+  relocate(gene_id)
+write.table(suplementary_data, "Supplementary_data_9.tsv", sep="\t", row.names=F, quote=F)
+
+```
+Read in RMATs results
+
+```{r}
+library(tidyverse)
+read.delim("../../../../../HCT-NMD_KD/requant/rmats.dir/HCT116/RI.MATS.JC.txt") %>%
+  dplyr::select(-ID, -ID.1) %>%
+  distinct() %>%
+  write.table("Supplmentary_data_10.tsv", sep="\t", row.names=F, quote=F)
+
+```
+
+DO the same for the CHIR seq
+
+```{r}
+read.delim("../../../../../HCT_CHIR/RMATS/outputs/RI.MATS.JC.txt") %>%
+  dplyr::select(-ID, -ID.1) %>%
+  distinct() %>%
+  write.table("Supplmentary_data_11.tsv", sep="\t", row.names=F, quote=F)
+
+```
