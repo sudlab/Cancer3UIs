@@ -80,10 +80,10 @@ plotMA(dds_result)
 ```
 Add annotation for 3UIs
 ```{r}
-all_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.all_utrons.ids.gz", header=F)
-novel_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.novel_utrons.ids.gz", header=F)
-partnered_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.partnered_utrons.ids.gz", header=F)
-non_cds <- read.delim("../../../../final_classifications/utron_beds.dir/CCLE-agg-agg.no_cds_utrons.ids.gz", header=F)
+all_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.all_utrons.ids.gz", header=F)
+novel_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.novel_utrons.ids.gz", header=F)
+partnered_utrons <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.partnered_utrons.ids.gz", header=F)
+non_cds <- read.delim("../../../../final_classifications/utron_beds.dir/TCGA-agg-agg.no_cds_utrons.ids.gz", header=F)
 
 utron_annotation <- data.frame(  transcript_id = rownames(dds_result)) %>%
   mutate(has_3UI = transcript_id %in% all_utrons$V1,
@@ -96,9 +96,12 @@ suplementary_data <- dds_result %>%
   left_join(tx2gene) %>%
   left_join(utron_annotation) %>%
   relocate(gene_id)
-write.table(suplementary_data, "Supplementary_data_9.tsv", sep="\t", row.names=F, quote=F)
+write.table(suplementary_data, "Supplementary_data_9a.tsv", sep="\t", row.names=F, quote=F)
 
 ```
+
+
+
 Read in RMATs results
 
 ```{r}
@@ -106,7 +109,7 @@ library(tidyverse)
 read.delim("../../../../../HCT-NMD_KD/requant/rmats.dir/HCT116/RI.MATS.JC.txt") %>%
   dplyr::select(-ID, -ID.1) %>%
   distinct() %>%
-  write.table("Supplmentary_data_10.tsv", sep="\t", row.names=F, quote=F)
+  write.table("Supplmentary_data_9c.tsv", sep="\t", row.names=F, quote=F)
 
 ```
 
@@ -116,6 +119,6 @@ DO the same for the CHIR seq
 read.delim("../../../../../HCT_CHIR/RMATS/outputs/RI.MATS.JC.txt") %>%
   dplyr::select(-ID, -ID.1) %>%
   distinct() %>%
-  write.table("Supplmentary_data_11.tsv", sep="\t", row.names=F, quote=F)
+  write.table("Supplmentary_data_9d.tsv", sep="\t", row.names=F, quote=F)
 
 ```
