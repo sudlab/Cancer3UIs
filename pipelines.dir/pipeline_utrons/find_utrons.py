@@ -103,6 +103,8 @@ def main(argv=None):
                       help="Supply output bed file name for novel introns")
     parser.add_option("-c", "--not-cds-outfile", dest="not_cds_file", type="string",
                       help="Outfile for introns that overlap CDS in no transcripts")
+    parser.add_option("-g", "--gtf-out-file", dest="gtf_out", type="string",
+                      help="Supply a file name to output 3UI transcripts with annotated CDS")
     parser.add_option("--novel-transcript", dest="novel_id", type="string",
                       help="DEBUG: Output info for this transcript from the STDIN")
     parser.add_option("--target-transcript", dest="target_id", type="string",
@@ -117,7 +119,8 @@ def main(argv=None):
     individualpartnered = []
     novel = []
     not_cds_utrons = []
-
+    novel_transcript_cds = []
+    
     db = pandas.read_csv(options.classfile, sep="\t")
 
     # This keeps just one entry per-transcript - why? 
@@ -190,6 +193,7 @@ def main(argv=None):
         if output_novel:
             E.debug("Transcripts with compatible starts are %s" % selected_models)
             
+        CDS = dict()
         for ref_transcript_id in selected_models:
 
             if output_novel and ref_transcript_id == options.target_id:
@@ -277,7 +281,21 @@ def main(argv=None):
                 if output_ref:
                     E.debug("No UTR introns")
                 continue
-
+            
+            CDS[ref_transcript_id] = filter(second, lambda x: x.feature == "CDS")
+            
+            copied_from = ref_transcript[0].transcript_id
+            if "protein_id" in ref_transcript[0].attributes:
+                protein_id = ref_transcript[0].protein_id
+            else:
+                protein_id = None
+                
+            for exon in CDS[ref_transcript]:
+                exon.attributes = novel_transcript.attributes
+                exon["copied_from"] = exon.transcript_id
+                if protein_id:
+                    exon["protein_id"] = protein_id
+                
             outbed = Bed.Bed()
             outbed.fields = ['.', '.', '.', '.', '.', '.', '.', '.', '.']
             outbed.fromIntervals(UTR3introns)
@@ -362,6 +380,14 @@ def main(argv=None):
                 outbed6["strand"] = novel_transcript[0].strand
                 outbed6["thickStart"] = ens_stop
                 not_cds_utrons.append(outbed6)
+        
+        if (options.gtf_out is not None) and (len(CDS) > 0):
+            novel_transcript.extend(
+                CDS.get(novel_transcript[0].transcript_id,
+                        CDS[CDS.keys[0]])
+            )
+            novel_transcript = sorted(novel_transcript, key = lambda x: x.start)
+            novel_transcript_cds.extend(novel_transcript)      
 
     with IOTools.open_file(options.outfile, "w") as outf:
         for line in outlines:
@@ -392,9 +418,13 @@ def main(argv=None):
             for line in not_cds_utrons:
                 outf6.write(str(line)+"\n")
 
+    if options.gtf_out is not None:
+        with IOTools.openFile(options.gtf_out, "w") as outf7:
+            for entry in novel_transcript_cds:
+                outf7.write(str(entry))
+                
     # write footer and output benchmark information.
     E.stop()
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
-
