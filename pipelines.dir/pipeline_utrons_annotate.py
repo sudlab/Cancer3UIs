@@ -261,7 +261,7 @@ def filterGTFs(infiles, outfile):
  
     
 # ---------------------------------------------------
-@follows(mkdir("utron_beds.dir"), classifyTranscripts)
+@follows(mkdir("utron_beds.dir"), mkdir("utron_gtfs.dir"), classifyTranscripts)
 @subdivide(filterGTFs,
            regex("(.+)/(.+).filtered.gtf.gz"),
            add_inputs(PARAMS["annotations_filtered_reference_gtf"],
@@ -270,13 +270,14 @@ def filterGTFs(infiles, outfile):
             r"utron_beds.dir/\2.indevidual_utrons.bed.gz",
             r"utron_beds.dir/\2.partnered_utrons.bed.gz",
             r"utron_beds.dir/\2.novel_utrons.bed.gz",
-            r"utron_beds.dir/\2.no_cds_utrons.bed.gz"])
+            r"utron_beds.dir/\2.no_cds_utrons.bed.gz",
+            r"utron_gtfs.dir/\2.gtf.gz"])
 def find_utrons(infiles, outfiles):
 
     infile, reference, classfile = infiles
     job_memory="48G"
 
-    all_out, all_bed6_out, part_out, novel_out, no_cds_out = outfiles
+    all_out, all_bed6_out, part_out, novel_out, no_cds_out, gtf_out = outfiles
 
     track = P.snip(all_out, ".all_utrons.bed.gz")
     current_file = __file__ 
@@ -296,6 +297,7 @@ def find_utrons(infiles, outfiles):
                              --partfile=%(part_out)s
                              --novel-file=%(novel_out)s
                              --not-cds-outfile=%(no_cds_out)s
+                             --gtf-out-file=%(gtf_out)s
                               -L %(track)s.log'''
 
     P.run(statement)
